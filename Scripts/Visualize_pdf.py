@@ -2,11 +2,51 @@ import os
 import glob
 import fitz  # PyMuPDF
 
+def process_pdf_layers(pdf_path, output_dir):
+    filename = os.path.basename(pdf_path)
+    print(f"Processing: {filename}...")
+
+    # Define the 4 separate outputs we want to create
+    types = ['text_only', 'images_only', 'drawings_only', 'combined']
+    docs = {t: fitz.open(pdf_path) for t in types}
+
+    # Process page by page across all document copies simultaneously
+    for page_num in range(len(docs['combined'])):
+        # Grab the same page from each document instance
+        pages = {t: docs[t][page_num] for t in types}
+
+        # 1. Gather Layout Data
+        text_blocks = pages['combined'].get_text("blocks")
+        image_info = pages['combined'].get_image_info()
+        drawings = pages['combined'].get_drawings()
+
+        # 2. Draw TEXT Boxes (Red) -> Applied to text_only and combined
+        for block in text_blocks:
+            rect = fitz.Rect(block[0], block[1], block[2], block[3])
+            pages['text_only'].draw_rect(rect, color=[1, 0, 0], width=1.5)
+            pages['combined'].draw_rect(rect, color=[1, 0, 0], width=1.5)
+
+        # 3. Draw IMAGE Boxes (Blue) -> Applied to images_only and combined
+        for img in image_info:
+            rect = fitz.Rect(img["bbox"])
+            pages['images_only'].draw_rect(rect, color=[0, 0, 1], width=1.5)
+            pages['combined'].draw_rect(rect, color=[0, 0, 1], width=1.5)
+
+        # 4. Draw DRAWINGS Boxes (Green) -> Applied to drawings_only and combined
+        for draw in drawings:
+            rect = draw["rect"]
+            pages['drawings_only'].draw_rect(rect, color=[0, 0.6, 0], width=1)
+            pages['combined'].draw_rect(rect, color=[0, 0.6, 0], width=1)
+
+    # Save all 4 variations to the output directory
+    for t, doc in docs.items():
+        output_path = os.path.join(output_dir, f"{t}_{filename}")
+        doc.save(output_path)
+        doc.close()
+        print(f" -> Saved: {output_path}")
+
 def process_all_pdfs(input_dir, output_dir):
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Find all PDFs in the input folder
     pdf_files = glob.glob(os.path.join(input_dir, "*.pdf"))
     
     if not pdf_files:
@@ -14,33 +54,7 @@ def process_all_pdfs(input_dir, output_dir):
         return
 
     for pdf_path in pdf_files:
-        filename = os.path.basename(pdf_path)
-        output_path = os.path.join(output_dir, f"boxed_{filename}")
-        print(f"Processing: {filename}...")
-        
-        doc = fitz.open(pdf_path)
-        
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            
-            # 1. TEXT BOUNDING BOXES (Red)
-            for block in page.get_text("blocks"):
-                rect = fitz.Rect(block[0], block[1], block[2], block[3])
-                page.draw_rect(rect, color=[1, 0, 0], width=1.5)
-                
-            # 2. IMAGE BOUNDING BOXES (Blue)
-            for img in page.get_image_info():
-                rect = fitz.Rect(img["bbox"])
-                page.draw_rect(rect, color=[0, 0, 1], width=1.5)
-                
-            # 3. VECTOR GRAPHICS / TABLES (Green)
-            for draw in page.get_drawings():
-                page.draw_rect(draw["rect"], color=[0, 0.6, 0], width=1)
-
-        doc.save(output_path)
-        doc.close()
-        print(f"Successfully created: {output_path}")
+        process_pdf_layers(pdf_path, output_dir)
 
 if __name__ == "__main__":
     process_all_pdfs("input", "output")
-  
