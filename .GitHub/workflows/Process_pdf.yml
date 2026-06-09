@@ -1,0 +1,45 @@
+name: Process PDF Bounding Boxes
+
+on:
+  # Allows you to manually trigger the workflow from the Actions tab
+  workflow_dispatch:
+  # Runs automatically whenever a PDF is pushed to the main branch inside the input folder
+  push:
+    paths:
+      - 'input/**.pdf'
+
+jobs:
+  draw-boxes:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Check out the code from the repository
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # Step 2: Set up a Python environment
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip' # Speeds up subsequent runs
+
+    # Step 3: Install PyMuPDF
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    # Step 4: Run the layout analysis script
+    - name: Run Visualizer Script
+      run: |
+        python scripts/visualize_pdf.py
+
+    # Step 5: Upload the output folder as a GitHub Artifact
+    - name: Upload Processed PDFs
+      uses: actions/upload-artifact@v4
+      with:
+        name: visualized-bounding-boxes
+        path: output/
+        retention-days: 7 # Kept for 7 days before auto-deleting
+        
