@@ -33,7 +33,7 @@ jobs:
     # Step 4: Run the layout analysis script
     - name: Run Visualizer Script
       run: |
-        python scripts/visualize_pdf.py
+        python Scripts/visualize_pdf.py
 
     # Step 5: Upload the output folder as a GitHub Artifact
     - name: Upload Processed PDFs
