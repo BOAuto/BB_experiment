@@ -1,12 +1,13 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.contentstream.PDFStreamEngine;
+import org.apache.pdfbox.cos.*;
 import org.apache.pdfbox.contentstream.operator.Operator;
-import org.apache.pdfbox.cos.COSName;
+import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDStream;
 
-import java.io.File;
+import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,7 +21,7 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
             for (PDPage page : doc.getPages()) {
-                recolorPage(doc, page);
+                process(page, doc);
             }
 
             doc.save(output);
@@ -29,67 +30,58 @@ public class VectorRecolor {
         System.out.println("Saved: " + output);
     }
 
-    private static void recolorPage(PDDocument doc, PDPage page) throws Exception {
+    private static void process(PDPage page, PDDocument doc) throws IOException {
 
-        ColorRewriter engine = new ColorRewriter();
-        engine.processPage(page);
+        COSBase base = page.getCOSObject().getItem(COSName.CONTENTS);
 
-        List<Object> rewritten = engine.getRewrittenContent();
-
-        // overwrite page content stream safely
-        try (PDPageContentStream cs =
-                     new PDPageContentStream(doc, page,
-                             PDPageContentStream.AppendMode.OVERWRITE, false)) {
-
-            for (Object o : rewritten) {
-                if (o instanceof String s) {
-                    cs.writeOperator(() -> s);
-                } else {
-                    cs.appendRawCommands(o.toString() + " ");
-                }
-            }
-        }
-    }
-
-    /**
-     * Content stream processor
-     */
-    static class ColorRewriter extends PDFStreamEngine {
-
-        private final List<Object> output = new ArrayList<>();
-
-        public List<Object> getRewrittenContent() {
-            return output;
+        if (!(base instanceof COSStream cosStream)) {
+            return;
         }
 
-        @Override
-        protected void processOperator(Operator operator, List<java.awt.geom.GeneralPath> operands) {
+        // ✔ ONLY VALID CONSTRUCTOR IN YOUR BUILD
+        PDFStreamParser parser = new PDFStreamParser(cosStream);
+        parser.parse();
 
-            String op = operator.getName();
+        List<Object> tokens = parser.getTokens();
+        List<Object> outputTokens = new ArrayList<>();
 
-            try {
+        for (Object token : tokens) {
 
-                switch (op) {
+            if (token instanceof Operator op) {
 
-                    // stroke RGB
+                String name = op.getName();
+
+                switch (name) {
+
+                    // stroke RGB → black
                     case "RG":
                     case "rg":
-                        output.add("0 0 0 " + op);
-                        return;
+                        outputTokens.add(COSInteger.ZERO);
+                        outputTokens.add(COSInteger.ZERO);
+                        outputTokens.add(COSInteger.ZERO);
+                        outputTokens.add(op);
+                        continue;
 
-                    // grayscale stroke/fill
+                    // grayscale
                     case "G":
                     case "g":
-                        output.add("0 " + op);
-                        return;
-
-                    default:
-                        output.add(operator.getName());
+                        outputTokens.add(COSInteger.ZERO);
+                        outputTokens.add(op);
+                        continue;
                 }
-
-            } catch (Exception e) {
-                output.add(operator.getName());
             }
+
+            outputTokens.add(token);
         }
+
+        // ✔ SAFE REPLACEMENT
+        PDStream newStream = new PDStream(doc);
+
+        try (OutputStream out = newStream.createOutputStream()) {
+            ContentStreamWriter writer = new ContentStreamWriter(out);
+            writer.writeTokens(outputTokens);
+        }
+
+        page.setContents(newStream);
     }
 }
