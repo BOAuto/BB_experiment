@@ -16,16 +16,7 @@ jobs:
           java-version: 17
 
       - name: Build
-        run: mvn -B compile
+        run: mvn -B clean compile
 
       - name: Run
-        run: |
-          mkdir -p output
-          mvn exec:java \
-            -Dexec.mainClass=VectorRecolor \
-            -Dexec.args="input.pdf output/result.pdf"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pdf-output
-          path: output/result.pdf
+        run: mvn exec:java
