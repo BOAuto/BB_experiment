@@ -1,4 +1,4 @@
-name: PDF Vector Recolor
+name: Vector Recolor
 
 on:
   workflow_dispatch:
@@ -8,15 +8,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Build
+      - name: Build project
         run: mvn -B clean compile
 
-      - name: Run
+      - name: Run program
         run: mvn exec:java
+
+      - name: Upload output PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-recolor-output
+          path: pdfs/output.pdf
