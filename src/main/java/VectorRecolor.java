@@ -1,15 +1,17 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.*;
 import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 
-import java.io.File;
+import java.io.*;
+import java.util.ArrayList;
 import java.util.List;
 
-public class VectorRecolor extends PDFStreamEngine {
+public class VectorRecolor {
 
     public static void main(String[] args) throws Exception {
 
@@ -18,10 +20,8 @@ public class VectorRecolor extends PDFStreamEngine {
 
         try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
-            VectorRecolor engine = new VectorRecolor();
-
             for (PDPage page : doc.getPages()) {
-                engine.processPage(page);
+                rewritePage(page, doc);
             }
 
             doc.save(output);
@@ -30,35 +30,54 @@ public class VectorRecolor extends PDFStreamEngine {
         System.out.println("Saved: " + output);
     }
 
-    @Override
-    protected void processOperator(Operator operator, List<COSBase> operands) {
+    private static void rewritePage(PDPage page, PDDocument doc) throws IOException {
 
-        String op = operator.getName();
+        COSBase base = page.getCOSObject().getItem(COSName.CONTENTS);
 
-        try {
+        if (!(base instanceof COSStream)) return;
 
-            // FORCE COLOR OPERATORS TO BLACK
-            switch (op) {
+        COSStream cosStream = (COSStream) base;
 
-                case "rg": // fill RGB
-                case "RG": // stroke RGB
-                    operands.clear();
-                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
-                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
-                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
-                    break;
+        PDFStreamParser parser = new PDFStreamParser(cosStream);
+        parser.parse();
 
-                case "g": // grayscale fill
-                case "G": // grayscale stroke
-                    operands.clear();
-                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
-                    break;
+        List<Object> tokens = parser.getTokens();
+        List<Object> newTokens = new ArrayList<>();
+
+        for (Object token : tokens) {
+
+            if (token instanceof Operator op) {
+
+                String name = op.getName();
+
+                switch (name) {
+
+                    // fill RGB
+                    case "rg":
+                    case "RG":
+                        newTokens.add(COSInteger.ZERO);
+                        newTokens.add(COSInteger.ZERO);
+                        newTokens.add(COSInteger.ZERO);
+                        newTokens.add(Operator.getOperator(name));
+                        continue;
+
+                    // grayscale
+                    case "g":
+                    case "G":
+                        newTokens.add(COSInteger.ZERO);
+                        newTokens.add(Operator.getOperator(name));
+                        continue;
+                }
             }
 
-            super.processOperator(operator, operands);
-
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            newTokens.add(token);
         }
+
+        // write back stream
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ContentStreamWriter writer = new ContentStreamWriter(out);
+        writer.writeTokens(newTokens);
+
+        cosStream.setUnfilteredStream(out.toByteArray());
     }
 }
