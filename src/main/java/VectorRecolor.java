@@ -4,19 +4,17 @@ import org.apache.pdfbox.cos.COSFloat;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.*;
 import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import org.apache.pdfbox.contentstream.PDContentStream;
 
 import java.io.*;
 import java.util.*;
 
 public class VectorRecolor {
 
-    // target color (black)
     private static final float R = 0f;
     private static final float G = 0f;
     private static final float B = 0f;
@@ -42,9 +40,7 @@ public class VectorRecolor {
 
     private static void processPage(PDPage page) throws Exception {
 
-        PDStream stream = page.getContentStream();
-
-        if (stream != null) {
+        for (PDStream stream : page.getContentStreams()) {
             rewriteStream(stream);
         }
 
@@ -61,8 +57,7 @@ public class VectorRecolor {
 
             if (xobj instanceof PDFormXObject form) {
 
-                PDStream stream = form.getContentStream();
-                if (stream != null) {
+                for (PDStream stream : form.getContentStreams()) {
                     rewriteStream(stream);
                 }
 
@@ -73,11 +68,11 @@ public class VectorRecolor {
 
     private static void rewriteStream(PDStream stream) throws Exception {
 
-        // PDFBox 3.x correct parser usage
-        PDFStreamParser parser =
-                new PDFStreamParser(stream.getCOSObject());
+        PDContentStream cs = stream;
 
+        PDFStreamParser parser = new PDFStreamParser(cs);
         List<Object> tokens = parser.parse();
+
         List<Object> output = new ArrayList<>();
 
         boolean insideText = false;
@@ -91,7 +86,6 @@ public class VectorRecolor {
                 if ("BT".equals(name)) insideText = true;
                 if ("ET".equals(name)) insideText = false;
 
-                // inject color before vector paint operations
                 if (!insideText && isPaintOperator(name)) {
                     injectColor(output);
                 }
@@ -110,7 +104,6 @@ public class VectorRecolor {
     }
 
     private static boolean isPaintOperator(String op) {
-
         return op.equals("S") || op.equals("s") ||
                op.equals("f") || op.equals("F") || op.equals("f*") ||
                op.equals("B") || op.equals("B*") ||
@@ -119,13 +112,11 @@ public class VectorRecolor {
 
     private static void injectColor(List<Object> out) {
 
-        // stroke color
         out.add(new COSFloat(R));
         out.add(new COSFloat(G));
         out.add(new COSFloat(B));
         out.add(Operator.getOperator("RG"));
 
-        // fill color
         out.add(new COSFloat(R));
         out.add(new COSFloat(G));
         out.add(new COSFloat(B));
