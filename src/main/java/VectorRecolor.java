@@ -1,14 +1,19 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
-import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
-import org.apache.pdfbox.rendering.PageDrawer;
-import org.apache.pdfbox.rendering.PDFRenderer;
+import org.apache.pdfbox.cos.*;
+import org.apache.pdfbox.contentstream.PDFStreamEngine;
+import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.contentstream.operator.state.SetStrokingRGBColor;
+import org.apache.pdfbox.contentstream.operator.state.SetNonStrokingRGBColor;
+import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
+import org.apache.pdfbox.pdmodel.*;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 
-import java.io.File;
+import java.io.*;
+import java.util.*;
 
-public class VectorRecolor {
+public class VectorRecolor extends PDFStreamEngine {
 
     public static void main(String[] args) throws Exception {
 
@@ -19,14 +24,12 @@ public class VectorRecolor {
 
         try (PDDocument doc = Loader.loadPDF(new File(args[0]))) {
 
-            PDFRenderer renderer = new PDFRenderer(doc);
+            VectorRecolor engine = new VectorRecolor();
 
-            for (int i = 0; i < doc.getNumberOfPages(); i++) {
-                PDPage page = doc.getPage(i);
+            for (PDPage page : doc.getPages()) {
+                engine.processPage(page);
 
-                CustomDrawer drawer = new CustomDrawer(doc, page);
-
-                drawer.drawPage(page);
+                processXObjects(page.getResources());
             }
 
             doc.save(args[1]);
@@ -35,31 +38,51 @@ public class VectorRecolor {
         System.out.println("Saved: " + args[1]);
     }
 
-    // Custom renderer that forces vector color override
-    static class CustomDrawer extends PageDrawer {
+    private static void processXObjects(PDResources resources) throws Exception {
 
-        public CustomDrawer(PDDocument document, PDPage page) {
-            super(document, page);
-        }
+        if (resources == null) return;
 
-        @Override
-        protected void setStrokingColorSpace(org.apache.pdfbox.pdmodel.graphics.color.PDColorSpace colorSpace) {
-            super.setStrokingColorSpace(PDDeviceRGB.INSTANCE);
-        }
+        for (COSName name : resources.getXObjectNames()) {
 
-        @Override
-        protected void setNonStrokingColorSpace(org.apache.pdfbox.pdmodel.graphics.color.PDColorSpace colorSpace) {
-            super.setNonStrokingColorSpace(PDDeviceRGB.INSTANCE);
-        }
+            PDXObject obj = resources.getXObject(name);
 
-        @Override
-        protected void setStrokingColor(PDColor color) {
-            super.setStrokingColor(new PDColor(new float[]{0, 0, 0}, PDDeviceRGB.INSTANCE));
-        }
+            if (obj instanceof PDFormXObject form) {
 
-        @Override
-        protected void setNonStrokingColor(PDColor color) {
-            super.setNonStrokingColor(new PDColor(new float[]{0, 0, 0}, PDDeviceRGB.INSTANCE));
+                VectorRecolor engine = new VectorRecolor();
+                engine.processPage(form);
+
+                processXObjects(form.getResources());
+            }
         }
+    }
+
+    // This is the ONLY stable interception point in PDFBox 3.x
+    @Override
+    protected void processOperator(Operator operator, List<COSBase> operands) {
+
+        String op = operator.getName();
+
+        try {
+
+            // Force color before vector drawing ops
+            if (isPaint(op)) {
+
+                // force RGB black
+                getGraphicsState().setStrokingColor(0, 0, 0);
+                getGraphicsState().setNonStrokingColor(0, 0, 0);
+            }
+
+            super.processOperator(operator, operands);
+
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private boolean isPaint(String op) {
+        return op.equals("S") || op.equals("s") ||
+               op.equals("f") || op.equals("F") || op.equals("f*") ||
+               op.equals("B") || op.equals("B*") ||
+               op.equals("b") || op.equals("b*");
     }
 }
