@@ -5,6 +5,7 @@ import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.common.PDStream;
 
 import java.io.*;
 import java.util.ArrayList;
@@ -20,7 +21,7 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
             for (PDPage page : doc.getPages()) {
-                rewrite(page);
+                rewritePage(page);
             }
 
             doc.save(output);
@@ -29,16 +30,14 @@ public class VectorRecolor {
         System.out.println("Saved: " + output);
     }
 
-    private static void rewrite(PDPage page) throws IOException {
+    private static void rewritePage(PDPage page) throws IOException {
 
-        COSBase contents = page.getCOSObject().getItem(COSName.CONTENTS);
+        COSBase base = page.getCOSObject().getItem(COSName.CONTENTS);
 
-        if (!(contents instanceof COSStream cosStream)) {
-            return;
-        }
+        if (!(base instanceof COSStream cosStream)) return;
 
-        // ✔ CORRECT constructor in PDFBox 3.x
-        PDFStreamParser parser = new PDFStreamParser(page);
+        // ✔ CORRECT way in PDFBox 3.x
+        PDFStreamParser parser = new PDFStreamParser(cosStream);
         parser.parse();
 
         List<Object> tokens = parser.getTokens();
@@ -52,15 +51,15 @@ public class VectorRecolor {
 
                 switch (name) {
 
-                    case "rg": // fill RGB
-                    case "RG": // stroke RGB
+                    case "rg":
+                    case "RG":
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(op);
                         continue;
 
-                    case "g": // grayscale
+                    case "g":
                     case "G":
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(op);
@@ -71,14 +70,13 @@ public class VectorRecolor {
             newTokens.add(token);
         }
 
-        // ✔ write new stream safely (PDFBox 3.x way)
-        COSStream newStream = page.getCOSObject().getCOSDocument().createCOSStream();
-
+        // ✔ SAFE replacement (PDFBox 3.x supported)
+        PDStream newStream = new PDStream(page.getCOSObject().getCOSDocument());
         try (OutputStream out = newStream.createOutputStream()) {
             ContentStreamWriter writer = new ContentStreamWriter(out);
             writer.writeTokens(newTokens);
         }
 
-        page.getCOSObject().setItem(COSName.CONTENTS, newStream);
+        page.setContents(newStream);
     }
 }
