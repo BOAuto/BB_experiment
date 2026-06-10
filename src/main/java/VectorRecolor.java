@@ -26,22 +26,14 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(args[0]))) {
 
             for (PDPage page : doc.getPages()) {
-                processPage(page);
+                processCOS(page.getCOSObject());
+                processResources(page.getResources());
             }
 
             doc.save(args[1]);
         }
 
         System.out.println("Saved: " + args[1]);
-    }
-
-    private static void processPage(PDPage page) throws Exception {
-
-        for (PDStream stream : page.getContentStreams()) {
-            rewriteStream(stream);
-        }
-
-        processResources(page.getResources());
     }
 
     private static void processResources(PDResources resources) throws Exception {
@@ -53,22 +45,20 @@ public class VectorRecolor {
             PDXObject xobj = resources.getXObject(name);
 
             if (xobj instanceof PDFormXObject form) {
-
-                for (PDStream stream : form.getContentStreams()) {
-                    rewriteStream(stream);
-                }
-
+                processCOS(form.getCOSObject());
                 processResources(form.getResources());
             }
         }
     }
 
-    private static void rewriteStream(PDStream stream) throws Exception {
+    private static void processCOS(COSBase base) throws Exception {
 
-        PDFStreamParser parser = new PDFStreamParser(stream);
+        if (!(base instanceof COSStream cosStream)) return;
+
+        PDFStreamParser parser = new PDFStreamParser(cosStream);
         List<Object> tokens = parser.parse();
 
-        List<Object> output = new ArrayList<>();
+        List<Object> out = new ArrayList<>();
 
         boolean insideText = false;
 
@@ -81,31 +71,29 @@ public class VectorRecolor {
                 if ("BT".equals(name)) insideText = true;
                 if ("ET".equals(name)) insideText = false;
 
-                if (!insideText && isPaintOperator(name)) {
-                    injectColor(output);
+                if (!insideText && isPaint(name)) {
+                    inject(out);
                 }
             }
 
-            output.add(token);
+            out.add(token);
         }
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ContentStreamWriter writer = new ContentStreamWriter(baos);
-        writer.writeTokens(output);
+        writer.writeTokens(out);
 
-        try (OutputStream os = stream.createOutputStream()) {
-            os.write(baos.toByteArray());
-        }
+        cosStream.setUnfilteredStream(baos.toByteArray());
     }
 
-    private static boolean isPaintOperator(String op) {
+    private static boolean isPaint(String op) {
         return op.equals("S") || op.equals("s") ||
                op.equals("f") || op.equals("F") || op.equals("f*") ||
                op.equals("B") || op.equals("B*") ||
                op.equals("b") || op.equals("b*");
     }
 
-    private static void injectColor(List<Object> out) {
+    private static void inject(List<Object> out) {
 
         out.add(new COSFloat(R));
         out.add(new COSFloat(G));
