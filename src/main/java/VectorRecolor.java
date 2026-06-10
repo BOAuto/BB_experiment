@@ -1,14 +1,11 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.cos.COSName;
-import org.apache.pdfbox.cos.COSFloat;
+import org.apache.pdfbox.cos.*;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.*;
-import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
-import org.apache.pdfbox.contentstream.PDContentStream;
 
 import java.io.*;
 import java.util.*;
@@ -29,22 +26,14 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(args[0]))) {
 
             for (PDPage page : doc.getPages()) {
-                processPage(page);
+                processStream(page.getContentStream().getCOSObject());
+                processResources(page.getResources());
             }
 
             doc.save(args[1]);
         }
 
         System.out.println("Saved: " + args[1]);
-    }
-
-    private static void processPage(PDPage page) throws Exception {
-
-        for (PDStream stream : page.getContentStreams()) {
-            rewriteStream(stream);
-        }
-
-        processResources(page.getResources());
     }
 
     private static void processResources(PDResources resources) throws Exception {
@@ -57,20 +46,18 @@ public class VectorRecolor {
 
             if (xobj instanceof PDFormXObject form) {
 
-                for (PDStream stream : form.getContentStreams()) {
-                    rewriteStream(stream);
-                }
+                COSStream cosStream = form.getCOSObject();
+
+                processStream(cosStream);
 
                 processResources(form.getResources());
             }
         }
     }
 
-    private static void rewriteStream(PDStream stream) throws Exception {
+    private static void processStream(COSStream cosStream) throws Exception {
 
-        PDContentStream cs = stream;
-
-        PDFStreamParser parser = new PDFStreamParser(cs);
+        PDFStreamParser parser = new PDFStreamParser(cosStream);
         List<Object> tokens = parser.parse();
 
         List<Object> output = new ArrayList<>();
@@ -98,9 +85,7 @@ public class VectorRecolor {
         ContentStreamWriter writer = new ContentStreamWriter(baos);
         writer.writeTokens(output);
 
-        try (OutputStream os = stream.createOutputStream()) {
-            os.write(baos.toByteArray());
-        }
+        cosStream.setUnfilteredStream(baos.toByteArray());
     }
 
     private static boolean isPaintOperator(String op) {
