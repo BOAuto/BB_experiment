@@ -1,18 +1,16 @@
-name: Recolor PDF Vectors
+name: PDF Vector Recolor
 
 on:
   workflow_dispatch:
 
 jobs:
-  recolor:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
@@ -20,16 +18,14 @@ jobs:
       - name: Build
         run: mvn -B compile
 
-      - name: Recolor PDF
+      - name: Run
         run: |
           mkdir -p output
-
           mvn exec:java \
             -Dexec.mainClass=VectorRecolor \
-            -Dexec.args="pdfs/tcs_po3_rewritten.pdf output/tcs_po3_recolored.pdf"
+            -Dexec.args="input.pdf output/result.pdf"
 
-      - name: Upload Result
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: recolored-pdf
-          path: output/tcs_po3_recolored.pdf
+          name: pdf-output
+          path: output/result.pdf
