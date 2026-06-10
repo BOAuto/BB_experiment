@@ -4,23 +4,19 @@ import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
-import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 
 import java.io.File;
 import java.util.List;
 
 public class VectorRecolor extends PDFStreamEngine {
 
-    private static final PDColor BLACK =
-            new PDColor(new float[]{0f, 0f, 0f}, PDDeviceRGB.INSTANCE);
-
     public static void main(String[] args) throws Exception {
 
-        String inputPath = "pdfs/tcs_po3_rewritten.pdf";
-        String outputPath = "pdfs/output.pdf";
+        String input = "pdfs/tcs_po3_rewritten.pdf";
+        String output = "pdfs/output.pdf";
 
-        try (PDDocument doc = Loader.loadPDF(new File(inputPath))) {
+        try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
             VectorRecolor engine = new VectorRecolor();
 
@@ -28,10 +24,10 @@ public class VectorRecolor extends PDFStreamEngine {
                 engine.processPage(page);
             }
 
-            doc.save(outputPath);
+            doc.save(output);
         }
 
-        System.out.println("Saved: " + outputPath);
+        System.out.println("Saved: " + output);
     }
 
     @Override
@@ -41,11 +37,22 @@ public class VectorRecolor extends PDFStreamEngine {
 
         try {
 
-            // Vector drawing operators that produce visible shapes
-            if (isVectorDrawingOperator(op)) {
+            // FORCE COLOR OPERATORS TO BLACK
+            switch (op) {
 
-                getGraphicsState().setStrokingColor(BLACK);
-                getGraphicsState().setNonStrokingColor(BLACK);
+                case "rg": // fill RGB
+                case "RG": // stroke RGB
+                    operands.clear();
+                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
+                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
+                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
+                    break;
+
+                case "g": // grayscale fill
+                case "G": // grayscale stroke
+                    operands.clear();
+                    operands.add(new org.apache.pdfbox.cos.COSFloat(0));
+                    break;
             }
 
             super.processOperator(operator, operands);
@@ -53,12 +60,5 @@ public class VectorRecolor extends PDFStreamEngine {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-    }
-
-    private boolean isVectorDrawingOperator(String op) {
-        return op.equals("S") || op.equals("s") ||   // stroke
-               op.equals("f") || op.equals("F") ||   // fill
-               op.equals("B") || op.equals("B*") ||  // fill+stroke
-               op.equals("b") || op.equals("b*");    // close+fill+stroke
     }
 }
