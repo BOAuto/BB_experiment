@@ -26,14 +26,22 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(args[0]))) {
 
             for (PDPage page : doc.getPages()) {
-                processStream(page.getContentStream().getCOSObject());
-                processResources(page.getResources());
+                processPage(page);
             }
 
             doc.save(args[1]);
         }
 
         System.out.println("Saved: " + args[1]);
+    }
+
+    private static void processPage(PDPage page) throws Exception {
+
+        for (PDStream stream : page.getContentStreams()) {
+            rewriteStream(stream);
+        }
+
+        processResources(page.getResources());
     }
 
     private static void processResources(PDResources resources) throws Exception {
@@ -46,18 +54,18 @@ public class VectorRecolor {
 
             if (xobj instanceof PDFormXObject form) {
 
-                COSStream cosStream = form.getCOSObject();
-
-                processStream(cosStream);
+                for (PDStream stream : form.getContentStreams()) {
+                    rewriteStream(stream);
+                }
 
                 processResources(form.getResources());
             }
         }
     }
 
-    private static void processStream(COSStream cosStream) throws Exception {
+    private static void rewriteStream(PDStream stream) throws Exception {
 
-        PDFStreamParser parser = new PDFStreamParser(cosStream);
+        PDFStreamParser parser = new PDFStreamParser(stream);
         List<Object> tokens = parser.parse();
 
         List<Object> output = new ArrayList<>();
@@ -85,7 +93,9 @@ public class VectorRecolor {
         ContentStreamWriter writer = new ContentStreamWriter(baos);
         writer.writeTokens(output);
 
-        cosStream.setUnfilteredStream(baos.toByteArray());
+        try (OutputStream os = stream.createOutputStream()) {
+            os.write(baos.toByteArray());
+        }
     }
 
     private static boolean isPaintOperator(String op) {
