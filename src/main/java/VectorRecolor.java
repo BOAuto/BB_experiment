@@ -1,15 +1,12 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.cos.COSBase;
-import org.apache.pdfbox.cos.COSName;
-import org.apache.pdfbox.cos.COSStream;
-import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
+import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
-import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.common.PDStream;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
 
-import java.io.*;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -23,7 +20,7 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
             for (PDPage page : doc.getPages()) {
-                process(page, doc);
+                recolorPage(doc, page);
             }
 
             doc.save(output);
@@ -32,56 +29,67 @@ public class VectorRecolor {
         System.out.println("Saved: " + output);
     }
 
-    private static void process(PDPage page, PDDocument doc) throws IOException {
+    private static void recolorPage(PDDocument doc, PDPage page) throws Exception {
 
-        COSBase base = page.getCOSObject().getItem(COSName.CONTENTS);
+        ColorRewriter engine = new ColorRewriter();
+        engine.processPage(page);
 
-        if (!(base instanceof COSStream cosStream)) return;
+        List<Object> rewritten = engine.getRewrittenContent();
 
-        // ⚠️ ONLY SAFE CONSTRUCTOR IN YOUR VERSION
-        PDFStreamParser parser = new PDFStreamParser(page);
-        parser.parse();
+        // overwrite page content stream safely
+        try (PDPageContentStream cs =
+                     new PDPageContentStream(doc, page,
+                             PDPageContentStream.AppendMode.OVERWRITE, false)) {
 
-        List<Object> tokens = parser.getTokens();
-        List<Object> newTokens = new ArrayList<>();
-
-        for (Object token : tokens) {
-
-            if (token instanceof Operator op) {
-
-                String opName = op.getName();
-
-                switch (opName) {
-
-                    // RGB stroke
-                    case "RG":
-                    case "rg":
-                        newTokens.add(0f);
-                        newTokens.add(0f);
-                        newTokens.add(0f);
-                        newTokens.add(op);
-                        continue;
-
-                    // grayscale
-                    case "G":
-                    case "g":
-                        newTokens.add(0f);
-                        newTokens.add(op);
-                        continue;
+            for (Object o : rewritten) {
+                if (o instanceof String s) {
+                    cs.writeOperator(() -> s);
+                } else {
+                    cs.appendRawCommands(o.toString() + " ");
                 }
             }
+        }
+    }
 
-            newTokens.add(token);
+    /**
+     * Content stream processor
+     */
+    static class ColorRewriter extends PDFStreamEngine {
+
+        private final List<Object> output = new ArrayList<>();
+
+        public List<Object> getRewrittenContent() {
+            return output;
         }
 
-        // ✔ SAFE STREAM REPLACEMENT
-        PDStream newStream = new PDStream(doc);
+        @Override
+        protected void processOperator(Operator operator, List<java.awt.geom.GeneralPath> operands) {
 
-        try (OutputStream out = newStream.createOutputStream()) {
-            ContentStreamWriter writer = new ContentStreamWriter(out);
-            writer.writeTokens(newTokens);
+            String op = operator.getName();
+
+            try {
+
+                switch (op) {
+
+                    // stroke RGB
+                    case "RG":
+                    case "rg":
+                        output.add("0 0 0 " + op);
+                        return;
+
+                    // grayscale stroke/fill
+                    case "G":
+                    case "g":
+                        output.add("0 " + op);
+                        return;
+
+                    default:
+                        output.add(operator.getName());
+                }
+
+            } catch (Exception e) {
+                output.add(operator.getName());
+            }
         }
-
-        page.setContents(newStream);
     }
 }
