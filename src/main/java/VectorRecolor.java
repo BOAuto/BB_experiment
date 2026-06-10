@@ -4,13 +4,16 @@ import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
+import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
 
 import java.io.File;
 import java.util.List;
 
 public class VectorRecolor extends PDFStreamEngine {
 
-    private static final float[] BLACK = new float[]{0f, 0f, 0f};
+    private static final PDColor BLACK =
+            new PDColor(new float[]{0f, 0f, 0f}, PDDeviceRGB.INSTANCE);
 
     public static void main(String[] args) throws Exception {
 
@@ -28,7 +31,7 @@ public class VectorRecolor extends PDFStreamEngine {
             doc.save(outputPath);
         }
 
-        System.out.println("Saved output to: " + outputPath);
+        System.out.println("Saved: " + outputPath);
     }
 
     @Override
@@ -38,8 +41,9 @@ public class VectorRecolor extends PDFStreamEngine {
 
         try {
 
-            // vector drawing operators
-            if (isVectorOperator(op)) {
+            // Vector drawing operators that produce visible shapes
+            if (isVectorDrawingOperator(op)) {
+
                 getGraphicsState().setStrokingColor(BLACK);
                 getGraphicsState().setNonStrokingColor(BLACK);
             }
@@ -51,10 +55,10 @@ public class VectorRecolor extends PDFStreamEngine {
         }
     }
 
-    private boolean isVectorOperator(String op) {
-        return op.equals("S") || op.equals("s") ||
-               op.equals("f") || op.equals("F") ||
-               op.equals("B") || op.equals("B*") ||
-               op.equals("b") || op.equals("b*");
+    private boolean isVectorDrawingOperator(String op) {
+        return op.equals("S") || op.equals("s") ||   // stroke
+               op.equals("f") || op.equals("F") ||   // fill
+               op.equals("B") || op.equals("B*") ||  // fill+stroke
+               op.equals("b") || op.equals("b*");    // close+fill+stroke
     }
 }
