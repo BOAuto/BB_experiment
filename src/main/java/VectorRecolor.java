@@ -1,20 +1,14 @@
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.cos.*;
-import org.apache.pdfbox.contentstream.operator.Operator;
-import org.apache.pdfbox.pdfparser.PDFStreamParser;
-import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
-import org.apache.pdfbox.pdmodel.*;
-import org.apache.pdfbox.pdmodel.graphics.PDXObject;
-import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
+import org.apache.pdfbox.pdmodel.graphics.color.PDDeviceRGB;
+import org.apache.pdfbox.rendering.PageDrawer;
+import org.apache.pdfbox.rendering.PDFRenderer;
 
-import java.io.*;
-import java.util.*;
+import java.io.File;
 
 public class VectorRecolor {
-
-    private static final float R = 0f;
-    private static final float G = 0f;
-    private static final float B = 0f;
 
     public static void main(String[] args) throws Exception {
 
@@ -25,9 +19,14 @@ public class VectorRecolor {
 
         try (PDDocument doc = Loader.loadPDF(new File(args[0]))) {
 
-            for (PDPage page : doc.getPages()) {
-                processCOS(page.getCOSObject());
-                processResources(page.getResources());
+            PDFRenderer renderer = new PDFRenderer(doc);
+
+            for (int i = 0; i < doc.getNumberOfPages(); i++) {
+                PDPage page = doc.getPage(i);
+
+                CustomDrawer drawer = new CustomDrawer(doc, page);
+
+                drawer.drawPage(page);
             }
 
             doc.save(args[1]);
@@ -36,73 +35,31 @@ public class VectorRecolor {
         System.out.println("Saved: " + args[1]);
     }
 
-    private static void processResources(PDResources resources) throws Exception {
+    // Custom renderer that forces vector color override
+    static class CustomDrawer extends PageDrawer {
 
-        if (resources == null) return;
-
-        for (COSName name : resources.getXObjectNames()) {
-
-            PDXObject xobj = resources.getXObject(name);
-
-            if (xobj instanceof PDFormXObject form) {
-                processCOS(form.getCOSObject());
-                processResources(form.getResources());
-            }
-        }
-    }
-
-    private static void processCOS(COSBase base) throws Exception {
-
-        if (!(base instanceof COSStream cosStream)) return;
-
-        PDFStreamParser parser = new PDFStreamParser(cosStream);
-        List<Object> tokens = parser.parse();
-
-        List<Object> out = new ArrayList<>();
-
-        boolean insideText = false;
-
-        for (Object token : tokens) {
-
-            if (token instanceof Operator op) {
-
-                String name = op.getName();
-
-                if ("BT".equals(name)) insideText = true;
-                if ("ET".equals(name)) insideText = false;
-
-                if (!insideText && isPaint(name)) {
-                    inject(out);
-                }
-            }
-
-            out.add(token);
+        public CustomDrawer(PDDocument document, PDPage page) {
+            super(document, page);
         }
 
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        ContentStreamWriter writer = new ContentStreamWriter(baos);
-        writer.writeTokens(out);
+        @Override
+        protected void setStrokingColorSpace(org.apache.pdfbox.pdmodel.graphics.color.PDColorSpace colorSpace) {
+            super.setStrokingColorSpace(PDDeviceRGB.INSTANCE);
+        }
 
-        cosStream.setUnfilteredStream(baos.toByteArray());
-    }
+        @Override
+        protected void setNonStrokingColorSpace(org.apache.pdfbox.pdmodel.graphics.color.PDColorSpace colorSpace) {
+            super.setNonStrokingColorSpace(PDDeviceRGB.INSTANCE);
+        }
 
-    private static boolean isPaint(String op) {
-        return op.equals("S") || op.equals("s") ||
-               op.equals("f") || op.equals("F") || op.equals("f*") ||
-               op.equals("B") || op.equals("B*") ||
-               op.equals("b") || op.equals("b*");
-    }
+        @Override
+        protected void setStrokingColor(PDColor color) {
+            super.setStrokingColor(new PDColor(new float[]{0, 0, 0}, PDDeviceRGB.INSTANCE));
+        }
 
-    private static void inject(List<Object> out) {
-
-        out.add(new COSFloat(R));
-        out.add(new COSFloat(G));
-        out.add(new COSFloat(B));
-        out.add(Operator.getOperator("RG"));
-
-        out.add(new COSFloat(R));
-        out.add(new COSFloat(G));
-        out.add(new COSFloat(B));
-        out.add(Operator.getOperator("rg"));
+        @Override
+        protected void setNonStrokingColor(PDColor color) {
+            super.setNonStrokingColor(new PDColor(new float[]{0, 0, 0}, PDDeviceRGB.INSTANCE));
+        }
     }
 }
