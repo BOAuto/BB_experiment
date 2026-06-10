@@ -1,6 +1,5 @@
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.cos.*;
-import org.apache.pdfbox.contentstream.PDFStreamEngine;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
@@ -21,7 +20,7 @@ public class VectorRecolor {
         try (PDDocument doc = Loader.loadPDF(new File(input))) {
 
             for (PDPage page : doc.getPages()) {
-                rewritePage(page, doc);
+                rewrite(page);
             }
 
             doc.save(output);
@@ -30,15 +29,16 @@ public class VectorRecolor {
         System.out.println("Saved: " + output);
     }
 
-    private static void rewritePage(PDPage page, PDDocument doc) throws IOException {
+    private static void rewrite(PDPage page) throws IOException {
 
-        COSBase base = page.getCOSObject().getItem(COSName.CONTENTS);
+        COSBase contents = page.getCOSObject().getItem(COSName.CONTENTS);
 
-        if (!(base instanceof COSStream)) return;
+        if (!(contents instanceof COSStream cosStream)) {
+            return;
+        }
 
-        COSStream cosStream = (COSStream) base;
-
-        PDFStreamParser parser = new PDFStreamParser(cosStream);
+        // ✔ CORRECT constructor in PDFBox 3.x
+        PDFStreamParser parser = new PDFStreamParser(page);
         parser.parse();
 
         List<Object> tokens = parser.getTokens();
@@ -52,20 +52,18 @@ public class VectorRecolor {
 
                 switch (name) {
 
-                    // fill RGB
-                    case "rg":
-                    case "RG":
+                    case "rg": // fill RGB
+                    case "RG": // stroke RGB
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(COSInteger.ZERO);
                         newTokens.add(COSInteger.ZERO);
-                        newTokens.add(Operator.getOperator(name));
+                        newTokens.add(op);
                         continue;
 
-                    // grayscale
-                    case "g":
+                    case "g": // grayscale
                     case "G":
                         newTokens.add(COSInteger.ZERO);
-                        newTokens.add(Operator.getOperator(name));
+                        newTokens.add(op);
                         continue;
                 }
             }
@@ -73,11 +71,14 @@ public class VectorRecolor {
             newTokens.add(token);
         }
 
-        // write back stream
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        ContentStreamWriter writer = new ContentStreamWriter(out);
-        writer.writeTokens(newTokens);
+        // ✔ write new stream safely (PDFBox 3.x way)
+        COSStream newStream = page.getCOSObject().getCOSDocument().createCOSStream();
 
-        cosStream.setUnfilteredStream(out.toByteArray());
+        try (OutputStream out = newStream.createOutputStream()) {
+            ContentStreamWriter writer = new ContentStreamWriter(out);
+            writer.writeTokens(newTokens);
+        }
+
+        page.getCOSObject().setItem(COSName.CONTENTS, newStream);
     }
 }
