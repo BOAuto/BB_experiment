@@ -18,8 +18,6 @@ import java.util.List;
 
 public class VectorRecolor {
 
-    private static final boolean SAVE_DRAWINGS_ONLY = true;
-
     public static void main(String[] args) {
         File inputDir = new File("pdfs");
         File outputDir = new File("output_artifacts");
@@ -46,7 +44,7 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
-                    // Pass 1: Extract structural geometry coordinates
+                    // Pass 1: Extract layout cell coordinates
                     GeometryScanner scanner = new GeometryScanner(page);
                     scanner.processPage(page);
                     List<Rectangle2D> rawBoxes = scanner.getDetectedBoxes();
@@ -90,7 +88,12 @@ public class VectorRecolor {
                         System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Pass 2: Re-render the page layout while filtering out target left-line regions
+                        // Pass 2: Re-process the graphics stream using our structural exclusion rules
+                        // This updates the internal canvas by processing operators and stripping matched lines
+                        ContentExclusionEngine filterEngine = new ContentExclusionEngine(page, linesToKill);
+                        filterEngine.processPage(page);
+
+                        // Optional validation overlay: renders remaining active cell lines as green matrices
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -98,22 +101,9 @@ public class VectorRecolor {
                             contentStream.setLineWidth(1.0f);
 
                             for (VisualBox box : visualBoxes) {
-                                // Redraw cell properties only if they haven't been targeted by the flow normalization filters
                                 if (box.drawLeft) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                }
-                                if (box.drawTop) {
-                                    contentStream.moveTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                }
-                                if (box.drawRight) {
-                                    contentStream.moveTo(box.bounds.x + box.bounds.width, box.bounds.y);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                }
-                                if (box.drawBottom) {
-                                    contentStream.moveTo(box.bounds.x, box.bounds.y);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y);
                                 }
                                 contentStream.stroke();
                             }
@@ -129,10 +119,8 @@ public class VectorRecolor {
                     }
                 }
 
-                if (SAVE_DRAWINGS_ONLY) {
-                    document.save(outputFile);
-                    System.out.println(" -> Successfully saved output to: " + outputFile.getAbsolutePath());
-                }
+                document.save(outputFile);
+                System.out.println(" -> Successfully saved output to: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
                 System.err.println("Error processing " + inputFile.getName() + ": " + e.getMessage());
@@ -144,9 +132,6 @@ public class VectorRecolor {
         Rectangle2D.Float bounds;
         boolean isEmpty = false;
         boolean drawLeft = true;
-        boolean drawTop = true;
-        boolean drawRight = true;
-        boolean drawBottom = true;
 
         VisualBox(float x, float y, float w, float h) {
             this.bounds = new Rectangle2D.Float(x, y, w, h);
@@ -158,7 +143,6 @@ public class VectorRecolor {
         int totalLinesRemoved = 0;
     }
 
-    // Identifies the exact coordinate masks for left boundary vectors requiring removal
     private static NormalizationMetrics identifyTargetLines(List<VisualBox> boxes, List<Rectangle2D.Float> killList) {
         NormalizationMetrics stats = new NormalizationMetrics();
         
@@ -190,12 +174,10 @@ public class VectorRecolor {
                 }
             }
 
-            // Exclusively process matching Left-to-Right Continuous Flow columns
             if (immediateRowRepeat) {
-                target.drawLeft = false; // Disable drawing via our overlay engine
-                
-                // Track physical coordinate boundaries of this left line to kill it at the stream layer
-                killList.add(new Rectangle2D.Float(target.bounds.x - 1.5f, target.bounds.y - 1.0f, 3.0f, target.bounds.height + 2.0f));
+                target.drawLeft = false; 
+                // Build a strict masking window for intercepting the physical stream vectors
+                killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
                 
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved++;
@@ -205,7 +187,76 @@ public class VectorRecolor {
         return stats;
     }
 
-    // --- High-fidelity geometry extraction scanner ---
+    // --- FIX: Active Content Exclusion Engine suppressing matching primitives ---
+    private static class ContentExclusionEngine extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D.Float> exclusions;
+        private Double currentX, currentY;
+        private boolean skipActivePathElement = false;
+
+        protected ContentExclusionEngine(PDPage page, List<Rectangle2D.Float> exclusions) {
+            super(page);
+            this.exclusions = exclusions;
+        }
+
+        private void testVectorCoordinates(double x, double y) {
+            if (currentX != null && currentY != null) {
+                // Construct a virtual vector line bounding descriptor
+                double minX = Math.min(currentX, x);
+                double minY = Math.min(currentY, y);
+                double w = Math.max(Math.abs(x - currentX), 1.0);
+                double h = Math.max(Math.abs(y - currentY), 1.0);
+                Rectangle2D.Float structuralSegment = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
+
+                for (Rectangle2D.Float mask : exclusions) {
+                    if (mask.intersects(structuralSegment)) {
+                        // Match confirmed! Trigger suppression to dump execution of this primitive stroke
+                        skipActivePathElement = true;
+                        break;
+                    }
+                }
+            }
+            currentX = x;
+            currentY = y;
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
+            currentX = p0.getX();
+            currentY = p0.getY();
+            testVectorCoordinates(p2.getX(), p2.getY());
+        }
+
+        @Override public void moveTo(float x, float y) throws IOException { 
+            currentX = (double)x; 
+            currentY = (double)y; 
+        }
+
+        @Override public void lineTo(float x, float y) throws IOException { 
+            testVectorCoordinates(x, y); 
+        }
+
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            testVectorCoordinates(x3, y3);
+        }
+
+        @Override public void strokePath() throws IOException {
+            if (skipActivePathElement) {
+                // Drop this operation entirely — lines are actively erased from stream context
+                skipActivePathElement = false;
+            }
+            currentX = currentY = null;
+        }
+
+        @Override public void fillPath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
+    }
+
     private static class GeometryScanner extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
