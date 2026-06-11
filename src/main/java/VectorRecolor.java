@@ -6,6 +6,7 @@ import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSBase;
 import org.apache.pdfbox.cos.COSNumber;
+import org.apache.pdfbox.cos.COSFloat;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.text.PDFTextStripperByArea;
@@ -92,14 +93,14 @@ public class VectorRecolor {
                         System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Pass 2: Low-Level Operator Token Stream Mutator
-                        pruneStreamTokensAtCoordinates(document, page, linesToKill);
+                        // Pass 2: Low-Level Operator Token Stream Shortener
+                        shortenTargetLineVectors(document, page, linesToKill);
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
                         System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
-                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Surgically Erased Lines): %d", metrics.leftToRightCount));
-                        System.out.println(String.format("  -> Total Grid Lines Safely Removed: %d", metrics.totalLinesRemoved));
+                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Shortened Lines): %d", metrics.leftToRightCount));
+                        System.out.println(String.format("  -> Total Grid Lines Shortened to Minimum: %d", metrics.totalLinesRemoved));
                     } else {
                         System.out.println(String.format("Page %d: No drawn outline boxes were recorded.", i + 1));
                     }
@@ -160,19 +161,19 @@ public class VectorRecolor {
             }
 
             if (immediateRowRepeat) {
-                // Tight precision filter window matching only the target left vertical line frame
+                // Precision vector exclusion window matching the line boundaries closely
                 killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
                 
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved++;
-                System.out.println(String.format(" Target Match -> Suppressing Left Line boundary for Box #%d [X=%.1f, Y=%.1f]", i, target.bounds.x, target.bounds.y));
+                System.out.println(String.format(" Target Match -> Pinpointing Left Line boundary for Box #%d [X=%.1f, Y=%.1f]", i, target.bounds.x, target.bounds.y));
             }
         }
         return stats;
     }
 
-    // --- Token Manipulation Token Stream Mutator Implementation ---
-    private static void pruneStreamTokensAtCoordinates(PDDocument document, PDPage page, List<Rectangle2D.Float> targetMasks) throws IOException {
+    // --- Vector Line Vector Shortening Engine ---
+    private static void shortenTargetLineVectors(PDDocument document, PDPage page, List<Rectangle2D.Float> targetMasks) throws IOException {
         PDFStreamParser parser = new PDFStreamParser(page);
         List<Object> finalTokens = new ArrayList<>();
         
@@ -186,7 +187,6 @@ public class VectorRecolor {
                 Operator op = (Operator) token;
                 String opName = op.getName();
 
-                // Intercept and manipulate drawing subpaths dynamically
                 if (opName.equals("m") && arguments.size() >= 2) { // moveTo
                     if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber) {
                         lastCursorX = ((COSNumber) arguments.get(0)).floatValue();
@@ -194,13 +194,13 @@ public class VectorRecolor {
                     }
                 } else if (opName.equals("l") && arguments.size() >= 2) { // lineTo
                     if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber && lastCursorX != null && lastCursorY != null) {
-                        float targetX = ((COSNumber) arguments.get(0)).floatValue();
-                        float targetY = ((COSNumber) arguments.get(1)).floatValue();
+                        float originalTargetX = ((COSNumber) arguments.get(0)).floatValue();
+                        float originalTargetY = ((COSNumber) arguments.get(1)).floatValue();
                         
-                        float minX = Math.min(lastCursorX, targetX);
-                        float minY = Math.min(lastCursorY, targetY);
-                        float w = Math.max(Math.abs(targetX - lastCursorX), 0.5f);
-                        float h = Math.max(Math.abs(targetY - lastCursorY), 0.5f);
+                        float minX = Math.min(lastCursorX, originalTargetX);
+                        float minY = Math.min(lastCursorY, originalTargetY);
+                        float w = Math.max(Math.abs(originalTargetX - lastCursorX), 0.5f);
+                        float h = Math.max(Math.abs(originalTargetY - lastCursorY), 0.5f);
                         Rectangle2D.Float currentSegment = new Rectangle2D.Float(minX, minY, w, h);
 
                         boolean hitTargetLine = false;
@@ -212,15 +212,48 @@ public class VectorRecolor {
                         }
 
                         if (hitTargetLine) {
-                            // Mutation: Change lineTo operator ('l') to moveTo operator ('m') to safely preserve path chains
-                            op = Operator.getOperator("m");
+                            // Slices the drawing line vector down to a length of exactly 1.0 unit
+                            float shortenedX = lastCursorX;
+                            float shortenedY = lastCursorY;
+                            
+                            if (originalTargetY > lastCursorY) {
+                                shortenedY = lastCursorY + 1.0f; // Shorten vertical upward line
+                            } else if (originalTargetY < lastCursorY) {
+                                shortenedY = lastCursorY - 1.0f; // Shorten vertical downward line
+                            } else if (originalTargetX > lastCursorX) {
+                                shortenedX = lastCursorX + 1.0f; // Shorten horizontal rightward line
+                            } else if (originalTargetX < lastCursorX) {
+                                shortenedX = lastCursorX - 1.0f; // Shorten horizontal leftward line
+                            }
+
+                            // Commit the shortened coordinates to the current lineTo instruction
+                            arguments.set(0, new COSFloat(shortenedX));
+                            arguments.set(1, new COSFloat(shortenedY));
+
+                            // Output the shortened line drawing token sequence
+                            finalTokens.addAll(arguments);
+                            finalTokens.add(op);
+                            arguments.clear();
+
+                            // Inject an immediate follow-up navigation step to the original destination coordinates
+                            // This ensures that subsequent lines in the table connect flawlessly
+                            finalTokens.add(new COSFloat(originalTargetX));
+                            finalTokens.add(new COSFloat(originalTargetY));
+                            finalTokens.add(Operator.getOperator("m"));
+
+                        } else {
+                            // Standard line execution unchanged
+                            finalTokens.addAll(arguments);
+                            finalTokens.add(op);
+                            arguments.clear();
                         }
-                        lastCursorX = targetX;
-                        lastCursorY = targetY;
+                        
+                        lastCursorX = originalTargetX;
+                        lastCursorY = originalTargetY;
+                        continue; 
                     }
                 }
 
-                // Write arguments followed by the updated operator
                 finalTokens.addAll(arguments);
                 finalTokens.add(op);
                 arguments.clear();
@@ -232,7 +265,6 @@ public class VectorRecolor {
             finalTokens.addAll(arguments);
         }
 
-        // Flush modified layout tokens back into a fresh stream to replace the old contents
         PDStream updatedStream = new PDStream(document);
         try (OutputStream os = updatedStream.createOutputStream()) {
             org.apache.pdfbox.pdfwriter.ContentStreamWriter writer = new org.apache.pdfbox.pdfwriter.ContentStreamWriter(os);
