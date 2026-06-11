@@ -27,12 +27,12 @@ jobs:
         curl -sL https://repo1.maven.org/maven2/org/apache/pdfbox/fontbox/3.0.4/fontbox-3.0.4.jar -o lib/fontbox-3.0.4.jar
         curl -sL https://repo1.maven.org/maven2/commons-logging/commons-logging/1.3.4/commons-logging-1.3.4.jar -o lib/commons-logging-1.3.4.jar
 
-    # --- CHANGED: Forcefully clean the bin directory before compiling ---
-    name: Clean and Compile Java Code
-    run: |
-      rm -rf bin
-      mkdir -p bin
-      javac -cp "lib/*" -d bin src/main/java/VectorRecolor.java
+    # --- FIXED: Added the missing dash (-) right here ---
+    - name: Clean and Compile Java Code
+      run: |
+        rm -rf bin
+        mkdir -p bin
+        javac -cp "lib/*" -d bin src/main/java/VectorRecolor.java
 
     - name: Ensure input directory exists
       run: mkdir -p pdfs
