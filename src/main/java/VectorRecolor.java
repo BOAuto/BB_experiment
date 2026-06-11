@@ -15,6 +15,7 @@ import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class VectorRecolor {
@@ -36,35 +37,35 @@ public class VectorRecolor {
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
             System.out.println("\n========================================================");
-            System.out.println("[START] Processing Structure for: " + inputFile.getName());
+            System.out.println("[START] Fast-Processing Structure for: " + inputFile.getName());
             System.out.println("========================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
-                    System.out.println(String.format("\n--- PAGE %d (Height: %.2f) ---", i + 1, pageHeight));
+                    System.out.println(String.format("\n--- PAGE %d ---", i + 1));
                     
-                    // Step 1: Extract raw lines
+                    long startTime = System.currentTimeMillis();
+
+                    // Step 1: Extract lines
                     LineExtractorEngine lineEngine = new LineExtractorEngine(page);
                     lineEngine.processPage(page);
                     List<Line2D> allLines = lineEngine.getExtractedLines();
-                    System.out.println(String.format("[DEBUG] Extracted %d raw vector path lines.", allLines.size()));
+                    System.out.println(String.format(" -> Extracted %d raw lines.", allLines.size()));
 
-                    // Step 2: Assemble visual rectangles
-                    List<VisualRect> visualBoxes = GridStructureParser.findVisualRectangles(allLines);
-                    System.out.println(String.format("[DEBUG] Formed %d visual closed rectangles.", visualBoxes.size()));
+                    // Step 2: High-speed structural cell generation
+                    List<VisualRect> visualBoxes = GridStructureParser.findVisualRectanglesOptimized(allLines);
+                    System.out.println(String.format(" -> Formed %d visual boxes in %d ms.", visualBoxes.size(), (System.currentTimeMillis() - startTime)));
 
                     if (!visualBoxes.isEmpty()) {
-                        // Step 3: Check regions for text content
+                        // Step 3: Text Content evaluation
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                         stripper.setSortByPosition(true);
 
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             Rectangle2D.Float bounds = visualBoxes.get(b).bounds;
                             float awtY = pageHeight - bounds.y - bounds.height;
-                            
-                            // 1-point inward padding
                             stripper.addRegion("box_" + b, new Rectangle2D.Float(
                                 bounds.x + 1.0f, awtY + 1.0f, bounds.width - 2.0f, bounds.height - 2.0f
                             ));
@@ -72,21 +73,16 @@ public class VectorRecolor {
                         
                         stripper.extractRegions(page);
 
-                        System.out.println("\n--- Box Content Diagnostics ---");
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             VisualRect box = visualBoxes.get(b);
                             String textInside = stripper.getTextForRegion("box_" + b).trim();
                             box.hasContent = !textInside.isEmpty();
-                            
-                            System.out.println(String.format(" Box #%d -> Bounds[x=%.1f, y=%.1f, w=%.1f, h=%.1f] | Has Content: %b | Extracted Text: '%s'", 
-                                b, box.bounds.x, box.bounds.y, box.bounds.width, box.bounds.height, box.hasContent, textInside));
                         }
 
-                        // Step 4: Run proximity analysis and apply flow normalization
-                        System.out.println("\n--- Normalization Logic Diagnostics ---");
+                        // Step 4: Apply Normalization Matrix Rules
                         GridStructureParser.applyNormalizationRules(visualBoxes);
 
-                        // Step 5: Render surviving outlines
+                        // Step 5: Render surviving geometry
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -113,14 +109,12 @@ public class VectorRecolor {
                                 contentStream.stroke();
                             }
                         }
-                    } else {
-                        System.out.println("[WARN] No closed 4-sided structural boxes detected on this page.");
                     }
                 }
                 document.save(outputFile);
-                System.out.println("\n[SUCCESS] Generated: " + outputFile.getAbsolutePath());
+                System.out.println("\n[SUCCESS] Saved to: " + outputFile.getAbsolutePath());
             } catch (IOException e) {
-                System.err.println("[-] Error analyzing " + inputFile.getName() + ": " + e.getMessage());
+                System.err.println("[-] Error: " + e.getMessage());
             }
         }
     }
@@ -176,42 +170,76 @@ public class VectorRecolor {
 
     private static class GridStructureParser {
         
-        public static List<VisualRect> findVisualRectangles(List<Line2D> lines) {
+        // Optimized spatial sweep method running near O(N log N)
+        public static List<VisualRect> findVisualRectanglesOptimized(List<Line2D> lines) {
             List<VisualRect> rects = new ArrayList<>();
-            float snapTolerance = 4.0f; 
+            float tolerance = 4.0f;
 
             List<Line2D> horiz = new ArrayList<>();
             List<Line2D> vert = new ArrayList<>();
+            
             for (Line2D line : lines) {
-                if (Math.abs(line.getY1() - line.getY2()) <= snapTolerance) horiz.add(line);
-                else if (Math.abs(line.getX1() - line.getX2()) <= snapTolerance) vert.add(line);
+                // Normalize line segment point orders to simplify sweep comparisons
+                double x1 = Math.min(line.getX1(), line.getX2());
+                double x2 = Math.max(line.getX1(), line.getX2());
+                double y1 = Math.min(line.getY1(), line.getY2());
+                double y2 = Math.max(line.getY1(), line.getY2());
+                
+                if (Math.abs(y1 - y2) <= tolerance) {
+                    horiz.add(new Line2D.Double(x1, y1, x2, y1));
+                } else if (Math.abs(x1 - x2) <= tolerance) {
+                    vert.add(new Line2D.Double(x1, y1, x1, y2));
+                }
             }
 
-            for (Line2D hTop : horiz) {
-                for (Line2D hBot : horiz) {
+            // Sort lines spatially to optimize searching
+            Collections.sort(horiz, (a, b) -> Double.compare(b.getY1(), a.getY1())); // Top-to-bottom
+            Collections.sort(vert, (a, b) -> Double.compare(a.getX1(), b.getX1()));   // Left-to-right
+
+            // Loop horizontally but restrict inner verification to overlapping line bounds
+            for (int i = 0; i < horiz.size(); i++) {
+                Line2D hTop = horiz.get(i);
+                
+                for (int j = i + 1; j < horiz.size(); j++) {
+                    Line2D hBot = horiz.get(j);
+                    
+                    // Break early if we've gone too far structurally vertically 
+                    if (hTop.getY1() - hBot.getY1() > 150.0) break; 
                     if (hTop.getY1() <= hBot.getY1()) continue;
 
-                    for (Line2D vLeft : vert) {
-                        for (Line2D vRight : vert) {
-                            if (vLeft.getX1() >= vRight.getX1()) continue;
+                    // Locate vertical segments spanning across this specific row envelope
+                    List<Line2D> candidateVerts = new ArrayList<>();
+                    for (Line2D v : vert) {
+                        if (v.getY1() - tolerance <= hBot.getY1() && v.getY2() + tolerance >= hTop.getY1()) {
+                            // Check horizontal overlap boundaries
+                            double overlapLeft = Math.max(hTop.getX1(), hBot.getX1());
+                            double overlapRight = Math.min(hTop.getX2(), hBot.getX2());
+                            if (v.getX1() >= overlapLeft - tolerance && v.getX1() <= overlapRight + tolerance) {
+                                candidateVerts.add(v);
+                            }
+                        }
+                    }
+
+                    // Connect adjacent matching vertical columns inside this slice
+                    for (int k = 0; k < candidateVerts.size(); k++) {
+                        for (int m = k + 1; m < candidateVerts.size(); m++) {
+                            Line2D vLeft = candidateVerts.get(k);
+                            Line2D vRight = candidateVerts.get(m);
 
                             float minX = (float) vLeft.getX1();
                             float maxX = (float) vRight.getX1();
                             float minY = (float) hBot.getY1();
                             float maxY = (float) hTop.getY1();
 
-                            if (hTop.getX1() - snapTolerance <= minX && hTop.getX2() + snapTolerance >= maxX &&
-                                hBot.getX1() - snapTolerance <= minX && hBot.getX2() + snapTolerance >= maxX) {
-                                
-                                float width = maxX - minX;
-                                float height = maxY - minY;
-                                
-                                if (width > 4.0f && height > 4.0f) {
-                                    VisualRect detected = new VisualRect(minX, minY, width, height);
-                                    if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
-                                                                  && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
-                                        rects.add(detected);
-                                    }
+                            float width = maxX - minX;
+                            float height = maxY - minY;
+
+                            if (width > 4.0f && height > 4.0f) {
+                                VisualRect detected = new VisualRect(minX, minY, width, height);
+                                if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
+                                                              && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
+                                    rects.add(detected);
+                                    break; // Found immediate column bound, step to next
                                 }
                             }
                         }
@@ -224,8 +252,7 @@ public class VectorRecolor {
         public static void applyNormalizationRules(List<VisualRect> boxes) {
             float flowAlignmentThreshold = 6.0f; 
 
-            for (int i = 0; i < boxes.size(); i++) {
-                VisualRect target = boxes.get(i);
+            for (VisualRect target : boxes) {
                 if (target.hasContent) continue; 
 
                 boolean hasHorizontalFlow = false;
@@ -234,33 +261,23 @@ public class VectorRecolor {
                 for (VisualRect neighbor : boxes) {
                     if (target == neighbor) continue;
 
-                    boolean sameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < flowAlignmentThreshold;
-                    if (sameRow) {
+                    if (Math.abs(target.bounds.y - neighbor.bounds.y) < flowAlignmentThreshold) {
                         hasHorizontalFlow = true;
                     }
-
-                    boolean sameColumn = Math.abs(target.bounds.x - neighbor.bounds.x) < flowAlignmentThreshold;
-                    if (sameColumn) {
+                    if (Math.abs(target.bounds.x - neighbor.bounds.x) < flowAlignmentThreshold) {
                         hasVerticalFlow = true;
                     }
                 }
 
-                System.out.print(String.format(" -> Evaluating Empty Box #%d: HorizNeighbor=%b, VertNeighbor=%b", i, hasHorizontalFlow, hasVerticalFlow));
-                
                 if (hasHorizontalFlow && !hasVerticalFlow) {
                     target.drawLeft = false; 
-                    System.out.println(" -> Result: [Horizontal Flow Detected] Wiping Left Border.");
                 } else if (hasVerticalFlow && !hasHorizontalFlow) {
                     target.drawTop = false;  
-                    System.out.println(" -> Result: [Vertical Flow Detected] Wiping Top Border.");
                 } else if (!hasHorizontalFlow && !hasVerticalFlow) {
                     target.drawLeft = false;
                     target.drawTop = false;
                     target.drawRight = false;
                     target.drawBottom = false;
-                    System.out.println(" -> Result: [Isolated Box Detected] Wiping all 4 borders.");
-                } else {
-                    System.out.println(" -> Result: [Bidirectional Flow Detected] Leaving borders untouched.");
                 }
             }
         }
