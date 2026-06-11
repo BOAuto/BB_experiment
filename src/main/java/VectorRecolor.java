@@ -46,6 +46,8 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
+                    // --- PHASE 1: IN-MEMORY ANALYSIS ---
+                    // Read the layout elements into memory without modifying the page contents
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
                     List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
@@ -85,10 +87,13 @@ public class VectorRecolor {
                         }
 
                         System.out.println(String.format("\n--- Chain Neighbors Trace for Page %d ---", i + 1));
-                        // Step 3: Identify and log metrics without changing the drawing states
+                        
+                        // --- PHASE 2: TOPOLOGY TRANSFORMATION IN MEMORY ---
+                        // Modifies the boolean drawing flags inside our in-memory data objects
                         NormalizationMetrics metrics = applyChainLinkedNormalization(visualBoxes);
 
-                        // Step 4: Output structural lines back to the PDF page as separate objects
+                        // --- PHASE 3: ISOLATED RENDERING ON THE ORIGINAL DOCUMENT ---
+                        // We open a clean stream to draw ONLY the line objects that survived filtering
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -96,27 +101,26 @@ public class VectorRecolor {
                             contentStream.setLineWidth(1.0f);
 
                             for (VisualBox box : visualBoxes) {
-                                // Deconstruct the box structure and stroke each line independently.
-                                // If a flag is false, that specific line object is eliminated entirely.
+                                // Write out each verified border component as an absolute line object
                                 if (box.drawLeft) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke(); // Immediately commits the Left line segment object
+                                    contentStream.stroke(); 
                                 }
                                 if (box.drawTop) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y + box.bounds.height);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke(); // Immediately commits the Top line segment object
+                                    contentStream.stroke(); 
                                 }
                                 if (box.drawRight) {
                                     contentStream.moveTo(box.bounds.x + box.bounds.width, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke(); // Immediately commits the Right line segment object
+                                    contentStream.stroke(); 
                                 }
                                 if (box.drawBottom) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y);
-                                    contentStream.stroke(); // Immediately commits the Bottom line segment object
+                                    contentStream.stroke(); 
                                 }
                             }
                         }
@@ -169,14 +173,13 @@ public class VectorRecolor {
     private static NormalizationMetrics applyChainLinkedNormalization(List<VisualBox> boxes) {
         NormalizationMetrics stats = new NormalizationMetrics();
         
-        float alignmentTolerance = 5.0f;  // Max alignment deviation limit
-        float sizeMatchTolerance = 2.0f;  // Max shape structural difference limit
-        float gapSearchLimit = 15.0f;     // Spatial jump window to locate an adjacent cell
+        float alignmentTolerance = 5.0f;  
+        float sizeMatchTolerance = 2.0f;  
+        float gapSearchLimit = 15.0f;     
 
         for (int i = 0; i < boxes.size(); i++) {
             VisualBox target = boxes.get(i);
             
-            // Default drawing state guarantees nothing is hidden or shortened
             target.drawLeft = true;
             target.drawTop = true;
             target.drawRight = true;
@@ -189,7 +192,6 @@ public class VectorRecolor {
             boolean immediateRowRepeat = false;
             boolean immediateColRepeat = false;
 
-            // Step 1: Scan for an immediate matching neighbor along the horizontal row path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
@@ -208,7 +210,6 @@ public class VectorRecolor {
                 }
             }
 
-            // Step 2: Scan for an immediate matching neighbor along the vertical column path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
@@ -227,28 +228,41 @@ public class VectorRecolor {
                 }
             }
 
-            // Step 3: Classify layout properties and increment tracking logs only
             if (immediateRowRepeat && !immediateColRepeat) {
                 stats.leftToRightCount++;
                 stats.totalLinesIdentified += 1;
-                System.out.println("LOGGED: Continuous Row Flow (Identified Left Line)");
+                
+                target.drawTop = false;
+                target.drawRight = false;
+                target.drawBottom = false;
+                System.out.println("LOGGED: Continuous Row Flow (Preserved Left Line Only)");
+                
             } else if (immediateColRepeat && !immediateRowRepeat) {
                 stats.topToBottomCount++;
                 stats.totalLinesIdentified += 1;
-                System.out.println("LOGGED: Continuous Column Stack (Identified Top Line)");
+                
+                target.drawLeft = false;
+                target.drawRight = false;
+                target.drawBottom = false;
+                System.out.println("LOGGED: Continuous Column Stack (Preserved Top Line Only)");
+                
             } else if (immediateRowRepeat && immediateColRepeat) {
                 if (target.bounds.width < 22.0f) {
                     stats.leftToRightCount++;
                     stats.totalLinesIdentified += 1;
-                    System.out.println("LOGGED (Narrow Override): Grid Cross Gap (Identified Left Line)");
+                    
+                    target.drawTop = false;
+                    target.drawRight = false;
+                    target.drawBottom = false;
+                    System.out.println("LOGGED (Narrow Override): Grid Cross Gap (Preserved Left Line Only)");
                 } else {
                     stats.bidirectionalCount++;
-                    System.out.println("LOGGED: Full Table Matrix Block (Kept Intact)");
+                    System.out.println("LOGGED: Full Table Matrix Block (All 4 Lines Preserved)");
                 }
             } else {
                 stats.isolatedCount++;
                 stats.totalLinesIdentified += 4;
-                System.out.println("LOGGED: Isolated Box (Identified 4 Lines)");
+                System.out.println("LOGGED: Isolated Box (All 4 Lines Preserved)");
             }
         }
         return stats;
