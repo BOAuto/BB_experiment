@@ -15,6 +15,8 @@ import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 public class VectorRecolor {
@@ -51,9 +53,11 @@ public class VectorRecolor {
                     List<Line2D> allLines = lineEngine.getExtractedLines();
                     System.out.println(String.format("[DEBUG] Extracted %d raw vector path lines.", allLines.size()));
 
-                    // Step 2: Assemble visual closed rectangles
+                    // Step 2: Assemble visual closed rectangles using the high-performance window search
+                    long startTime = System.currentTimeMillis();
                     List<VisualRect> visualBoxes = GridStructureParser.findVisualRectangles(allLines);
-                    System.out.println(String.format("[DEBUG] Formed %d visual closed rectangles.", visualBoxes.size()));
+                    long endTime = System.currentTimeMillis();
+                    System.out.println(String.format("[DEBUG] Formed %d visual closed rectangles in %d ms.", visualBoxes.size(), (endTime - startTime)));
 
                     if (!visualBoxes.isEmpty()) {
                         // Step 3: Check regions for text content
@@ -86,32 +90,31 @@ public class VectorRecolor {
                         System.out.println("\n--- Normalization Logic Diagnostics ---");
                         GridStructureParser.applyNormalizationRules(visualBoxes);
 
-                        // Step 5: High-Precision Surgical Mask Overlay Layer
-                        // Instead of appending green lines, we mask out the canceled lines using the background color (White)
+                        // Step 5: High-Precision Visual Verification Layer (Green Lines)
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
-                            // We set the mask color to white and slightly widen the stroke to cleanly neutralize the black background line
-                            contentStream.setStrokingColor(Color.WHITE);
+                            // Set the color to GREEN so you can visually verify the output
+                            contentStream.setStrokingColor(Color.GREEN);
                             contentStream.setLineWidth(1.5f);
 
                             for (VisualRect box : visualBoxes) {
-                                if (!box.drawLeft) {
+                                if (box.drawLeft) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
                                     contentStream.stroke();
                                 }
-                                if (!box.drawTop) {
+                                if (box.drawTop) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y + box.bounds.height);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
                                     contentStream.stroke();
                                 }
-                                if (!box.drawRight) {
+                                if (box.drawRight) {
                                     contentStream.moveTo(box.bounds.x + box.bounds.width, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
                                     contentStream.stroke();
                                 }
-                                if (!box.drawBottom) {
+                                if (box.drawBottom) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y);
                                     contentStream.stroke();
@@ -130,13 +133,13 @@ public class VectorRecolor {
         }
     }
 
-    private static class VisualRect {
-        Rectangle2D.Float bounds;
-        boolean hasContent = false;
-        boolean drawLeft = true;
-        boolean drawTop = true;
-        boolean drawRight = true;
-        boolean drawBottom = true;
+    public static class VisualRect {
+        public Rectangle2D.Float bounds;
+        public boolean hasContent = false;
+        public boolean drawLeft = true;
+        public boolean drawTop = true;
+        public boolean drawRight = true;
+        public boolean drawBottom = true;
 
         VisualRect(float x, float y, float w, float h) {
             this.bounds = new Rectangle2D.Float(x, y, w, h);
@@ -187,35 +190,67 @@ public class VectorRecolor {
 
             List<Line2D> horiz = new ArrayList<>();
             List<Line2D> vert = new ArrayList<>();
+            
+            // Step 1: Segregate and normalize directional orientations
             for (Line2D line : lines) {
-                if (Math.abs(line.getY1() - line.getY2()) <= snapTolerance) horiz.add(line);
-                else if (Math.abs(line.getX1() - line.getX2()) <= snapTolerance) vert.add(line);
+                double x1 = line.getX1(), x2 = line.getX2();
+                double y1 = line.getY1(), y2 = line.getY2();
+                
+                if (Math.abs(y1 - y2) <= snapTolerance) {
+                    // Ensure left-to-right sorting consistency internally
+                    horiz.add(x1 <= x2 ? new Line2D.Double(x1, y1, x2, y1) : new Line2D.Double(x2, y1, x1, y1));
+                } else if (Math.abs(x1 - x2) <= snapTolerance) {
+                    // Ensure bottom-to-top sorting consistency internally
+                    vert.add(y1 <= y2 ? new Line2D.Double(x1, y1, x1, y2) : new Line2D.Double(x1, y2, x1, y1));
+                }
             }
 
-            for (Line2D hTop : horiz) {
-                for (Line2D hBot : horiz) {
+            // Step 2: Sort collections to enable sliding-window proximity searches
+            Collections.sort(horiz, Comparator.comparingDouble(Line2D::getY1));
+            Collections.sort(vert, Comparator.comparingDouble(Line2D::getX1));
+
+            // Step 3: Spatial alignment intersection mapping loop (Highly Optimized)
+            for (int i = 0; i < horiz.size(); i++) {
+                Line2D hTop = horiz.get(i);
+                
+                for (int j = 0; j < horiz.size(); j++) {
+                    Line2D hBot = horiz.get(j);
                     if (hTop.getY1() <= hBot.getY1()) continue;
+                    
+                    // Early exit logic if the vertical row bounds exceed any realistic table cell profile
+                    if (hTop.getY1() - hBot.getY1() > 150.0) continue;
 
-                    for (Line2D vLeft : vert) {
-                        for (Line2D vRight : vert) {
-                            if (vLeft.getX1() >= vRight.getX1()) continue;
-
+                    // Spatial window filtering strategy for matching vertical segments
+                    for (int k = 0; k < vert.size(); k++) {
+                        Line2D vLeft = vert.get(k);
+                        
+                        for (int l = k + 1; l < vert.size(); l++) {
+                            Line2D vRight = vert.get(l);
+                            
                             float minX = (float) vLeft.getX1();
                             float maxX = (float) vRight.getX1();
                             float minY = (float) hBot.getY1();
                             float maxY = (float) hTop.getY1();
 
+                            // Proximity check boundary limit to intercept early
+                            if (maxX - minX > 500.0f) break; 
+
                             if (hTop.getX1() - snapTolerance <= minX && hTop.getX2() + snapTolerance >= maxX &&
                                 hBot.getX1() - snapTolerance <= minX && hBot.getX2() + snapTolerance >= maxX) {
                                 
-                                float width = maxX - minX;
-                                float height = maxY - minY;
-                                
-                                if (width > 4.0f && height > 4.0f) {
-                                    VisualRect detected = new VisualRect(minX, minY, width, height);
-                                    if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
-                                                                  && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
-                                        rects.add(detected);
+                                // Validate that vertical lines physically span the horizontal bounds
+                                if (vLeft.getY1() - snapTolerance <= minY && vLeft.getY2() + snapTolerance >= maxY &&
+                                    vRight.getY1() - snapTolerance <= minY && vRight.getY2() + snapTolerance >= maxY) {
+
+                                    float width = maxX - minX;
+                                    float height = maxY - minY;
+                                    
+                                    if (width > 4.0f && height > 4.0f) {
+                                        VisualRect detected = new VisualRect(minX, minY, width, height);
+                                        if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
+                                                                      && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
+                                            rects.add(detected);
+                                        }
                                     }
                                 }
                             }
