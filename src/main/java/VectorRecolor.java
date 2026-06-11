@@ -15,7 +15,6 @@ import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 public class VectorRecolor {
@@ -30,61 +29,43 @@ public class VectorRecolor {
 
         File[] files = inputDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".pdf"));
         if (files == null || files.length == 0) {
-            System.out.println("[-] No PDF files found in 'pdfs/' directory.");
+            System.out.println("No PDF files found in 'pdfs/' directory.");
             return;
         }
 
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
-            System.out.println("\n========================================================");
-            System.out.println("[START] Accurate Grid Parsing for: " + inputFile.getName());
-            System.out.println("========================================================");
+            System.out.println("Processing Structure for: " + inputFile.getName() + "...");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
-                    float pageHeight = page.getMediaBox().getHeight();
-                    System.out.println(String.format("\n--- PAGE %d ---", i + 1));
                     
-                    long startTime = System.currentTimeMillis();
-
-                    // Step 1: Extract lines
+                    // Step 1: Extract raw vector lines
                     LineExtractorEngine lineEngine = new LineExtractorEngine(page);
                     lineEngine.processPage(page);
                     List<Line2D> allLines = lineEngine.getExtractedLines();
-                    System.out.println(String.format(" -> Extracted %d raw lines.", allLines.size()));
 
-                    // Step 2: High-accuracy structural cell generation using physical intersections
-                    List<VisualRect> visualBoxes = GridStructureParser.findTrueIntersectingBoxes(allLines);
-                    System.out.println(String.format(" -> Formed %d true intersecting visual boxes in %d ms.", visualBoxes.size(), (System.currentTimeMillis() - startTime)));
+                    // Step 2: Assemble visual rectangles from intersecting lines
+                    List<VisualRect> visualBoxes = GridStructureParser.findVisualRectangles(allLines);
 
                     if (!visualBoxes.isEmpty()) {
-                        // Step 3: Text Content evaluation
+                        // Step 3: Evaluate which boxes are empty using PDFTextStripperByArea
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
-                        stripper.setSortByPosition(true);
-
                         for (int b = 0; b < visualBoxes.size(); b++) {
-                            Rectangle2D.Float bounds = visualBoxes.get(b).bounds;
-                            float awtY = pageHeight - bounds.y - bounds.height;
-                            
-                            // 1.5-point inward padding ensures we don't accidentally scan the border lines as text
-                            stripper.addRegion("box_" + b, new Rectangle2D.Float(
-                                bounds.x + 1.5f, awtY + 1.5f, bounds.width - 3.0f, bounds.height - 3.0f
-                            ));
+                            stripper.addRegion("box_" + b, visualBoxes.get(b).bounds);
                         }
-                        
                         stripper.extractRegions(page);
 
                         for (int b = 0; b < visualBoxes.size(); b++) {
-                            VisualRect box = visualBoxes.get(b);
                             String textInside = stripper.getTextForRegion("box_" + b).trim();
-                            box.hasContent = !textInside.isEmpty();
+                            visualBoxes.get(b).hasContent = !textInside.isEmpty();
                         }
 
-                        // Step 4: Apply Normalization Matrix Rules
+                        // Step 4: Apply Normalization rules based on structural neighbors
                         GridStructureParser.applyNormalizationRules(visualBoxes);
 
-                        // Step 5: Render surviving geometry
+                        // Step 5: Render remaining valid boxes back out onto the page
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -92,6 +73,7 @@ public class VectorRecolor {
                             contentStream.setLineWidth(1.0f);
 
                             for (VisualRect box : visualBoxes) {
+                                // Draw remaining boundaries that survived normalization
                                 if (box.drawLeft) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
@@ -114,13 +96,14 @@ public class VectorRecolor {
                     }
                 }
                 document.save(outputFile);
-                System.out.println("\n[SUCCESS] Saved to: " + outputFile.getAbsolutePath());
+                System.out.println(" -> Saved structural normalization to: " + outputFile.getAbsolutePath());
             } catch (IOException e) {
-                System.err.println("[-] Error: " + e.getMessage());
+                System.err.println("Error analyzing " + inputFile.getName() + ": " + e.getMessage());
             }
         }
     }
 
+    // Container representing a visually parsed cell/box block
     private static class VisualRect {
         Rectangle2D.Float bounds;
         boolean hasContent = false;
@@ -134,6 +117,7 @@ public class VectorRecolor {
         }
     }
 
+    // Step 1: Engine focused purely on harvesting vector segment endpoints
     private static class LineExtractorEngine extends PDFGraphicsStreamEngine {
         private final List<Line2D> extractedLines = new ArrayList<>();
         private Point2D currentPoint = new Point2D.Float(0, 0);
@@ -170,59 +154,44 @@ public class VectorRecolor {
         @Override public void shadingFill(COSName shadingName) {}
     }
 
+    // Core Logical Analyzer for Table/Grid Layout structures
     private static class GridStructureParser {
         
-        public static List<VisualRect> findTrueIntersectingBoxes(List<Line2D> lines) {
+        // Simple geometric sweeper to find closed four-sided bounding blocks from line endpoints
+        public static List<VisualRect> findVisualRectangles(List<Line2D> lines) {
             List<VisualRect> rects = new ArrayList<>();
-            float tolerance = 3.0f; // Snapping padding for slight line offsets
+            float tolerance = 2.0f; // Snapping tolerance for disconnected vector ends
 
+            // Filter lines into horizontal and vertical collections
             List<Line2D> horiz = new ArrayList<>();
             List<Line2D> vert = new ArrayList<>();
-            
             for (Line2D line : lines) {
-                double x1 = Math.min(line.getX1(), line.getX2());
-                double x2 = Math.max(line.getX1(), line.getX2());
-                double y1 = Math.min(line.getY1(), line.getY2());
-                double y2 = Math.max(line.getY1(), line.getY2());
-                
-                if (Math.abs(y1 - y2) <= tolerance) {
-                    horiz.add(new Line2D.Double(x1, y1, x2, y1));
-                } else if (Math.abs(x1 - x2) <= tolerance) {
-                    vert.add(new Line2D.Double(x1, y1, x1, y2));
-                }
+                if (Math.abs(line.getY1() - line.getY2()) <= tolerance) horiz.add(line);
+                else if (Math.abs(line.getX1() - line.getX2()) <= tolerance) vert.add(line);
             }
 
-            // High-precision verification: Confirm lines physically cross each other
+            // Cross-reference intersections to construct closed bounding structures
             for (Line2D hTop : horiz) {
                 for (Line2D hBot : horiz) {
-                    if (hTop.getY1() <= hBot.getY1()) continue;
+                    if (hTop.getY1() <= hBot.getY1()) continue; // Keep top above bottom
 
                     for (Line2D vLeft : vert) {
-                        // Vertical line must intersect both horizontal bars
-                        if (!lineIntersectsWithTolerance(hTop, vLeft, tolerance) || 
-                            !lineIntersectsWithTolerance(hBot, vLeft, tolerance)) continue;
-
                         for (Line2D vRight : vert) {
                             if (vLeft.getX1() >= vRight.getX1()) continue;
-                            
-                            if (!lineIntersectsWithTolerance(hTop, vRight, tolerance) || 
-                                !lineIntersectsWithTolerance(hBot, vRight, tolerance)) continue;
 
-                            // All 4 lines successfully intersect to isolate a true closed visual rectangle
+                            // Check structural overlaps to verify they complete a visual cell ring
                             float minX = (float) vLeft.getX1();
                             float maxX = (float) vRight.getX1();
                             float minY = (float) hBot.getY1();
                             float maxY = (float) hTop.getY1();
 
-                            float width = maxX - minX;
-                            float height = maxY - minY;
-
-                            if (width > 5.0f && height > 5.0f) {
-                                VisualRect detected = new VisualRect(minX, minY, width, height);
-                                // De-duplicate identical structures
-                                if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 2.0f 
-                                                              && Math.abs(r.bounds.y - detected.bounds.y) < 2.0f
-                                                              && Math.abs(r.bounds.width - detected.bounds.width) < 2.0f)) {
+                            // Validate bounds logic
+                            if (hTop.getX1() - tolerance <= minX && hTop.getX2() + tolerance >= maxX &&
+                                hBot.getX1() - tolerance <= minX && hBot.getX2() + tolerance >= maxX) {
+                                
+                                VisualRect detected = new VisualRect(minX, minY, maxX - minX, maxY - minY);
+                                // Deduplicate matching coordinates
+                                if (rects.stream().noneMatch(r -> r.bounds.distance(detected.bounds.x, detected.bounds.y) < 3)) {
                                     rects.add(detected);
                                 }
                             }
@@ -233,18 +202,12 @@ public class VectorRecolor {
             return rects;
         }
 
-        // Helper to mathematically confirm if an infinite vertical line cross-section intercepts a horizontal bar segment
-        private static boolean lineIntersectsWithTolerance(Line2D hLine, Line2D vLine, float tolerance) {
-            boolean yInRange = (vLine.getY1() - tolerance <= hLine.getY1() && vLine.getY2() + tolerance >= hLine.getY1());
-            boolean xInRange = (vLine.getX1() >= hLine.getX1() - tolerance && vLine.getX1() <= hLine.getX2() + tolerance);
-            return yInRange && xInRange;
-        }
-
+        // Applies your spatial rule matrix over empty cells
         public static void applyNormalizationRules(List<VisualRect> boxes) {
-            float flowAlignmentThreshold = 6.0f; 
+            float proximityThreshold = 5.0f; // Padding to verify adjacent box borders
 
             for (VisualRect target : boxes) {
-                if (target.hasContent) continue; 
+                if (target.hasContent) continue; // Rules only apply to empty visual rects
 
                 boolean hasHorizontalFlow = false;
                 boolean hasVerticalFlow = false;
@@ -252,24 +215,32 @@ public class VectorRecolor {
                 for (VisualRect neighbor : boxes) {
                     if (target == neighbor) continue;
 
-                    if (Math.abs(target.bounds.y - neighbor.bounds.y) < flowAlignmentThreshold) {
+                    // Check if neighbor aligns horizontally (Left or Right side neighbor)
+                    boolean alignY = Math.abs(target.bounds.y - neighbor.bounds.y) < proximityThreshold;
+                    if (alignY) {
                         hasHorizontalFlow = true;
                     }
-                    if (Math.abs(target.bounds.x - neighbor.bounds.x) < flowAlignmentThreshold) {
+
+                    // Check if neighbor aligns vertically (Top or Bottom neighbor)
+                    boolean alignX = Math.abs(target.bounds.x - neighbor.bounds.x) < proximityThreshold;
+                    if (alignX) {
                         hasVerticalFlow = true;
                     }
                 }
 
+                // Apply Normalization Strategy Rules Matrix
                 if (hasHorizontalFlow && !hasVerticalFlow) {
-                    target.drawLeft = false; 
+                    target.drawLeft = false; // Remove left border line
                 } else if (hasVerticalFlow && !hasHorizontalFlow) {
-                    target.drawTop = false;  
+                    target.drawTop = false;  // Remove top border line
                 } else if (!hasHorizontalFlow && !hasVerticalFlow) {
+                    // Isolated empty box -> Wipe out all 4 lines
                     target.drawLeft = false;
                     target.drawTop = false;
                     target.drawRight = false;
                     target.drawBottom = false;
                 }
+                // If both are true (bidirectional flow), lines are preserved untouched
             }
         }
     }
