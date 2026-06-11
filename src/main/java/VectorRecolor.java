@@ -93,7 +93,7 @@ public class VectorRecolor {
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
                         // Pass 2: Low-Level Operator Token Stream Mutator
-                        pruneStreamTokensAtCoordinates(page, linesToKill);
+                        pruneStreamTokensAtCoordinates(document, page, linesToKill);
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
@@ -172,7 +172,7 @@ public class VectorRecolor {
     }
 
     // --- Token Manipulation Token Stream Mutator Implementation ---
-    private static void pruneStreamTokensAtCoordinates(PDPage page, List<Rectangle2D.Float> targetMasks) throws IOException {
+    private static void pruneStreamTokensAtCoordinates(PDDocument document, PDPage page, List<Rectangle2D.Float> targetMasks) throws IOException {
         PDFStreamParser parser = new PDFStreamParser(page);
         List<Object> finalTokens = new ArrayList<>();
         
@@ -233,7 +233,7 @@ public class VectorRecolor {
         }
 
         // Flush modified layout tokens back into a fresh stream to replace the old contents
-        PDStream updatedStream = new PDStream(page.getCOSObject().getCOSDocument());
+        PDStream updatedStream = new PDStream(document);
         try (OutputStream os = updatedStream.createOutputStream()) {
             org.apache.pdfbox.pdfwriter.ContentStreamWriter writer = new org.apache.pdfbox.pdfwriter.ContentStreamWriter(os);
             writer.writeTokens(finalTokens);
@@ -286,7 +286,6 @@ public class VectorRecolor {
         @Override public void clip(int windingRule) throws IOException {}
         @Override public void closePath() throws IOException {}
         @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
-        @Override Point2D getInitialPosition() { return new Point2D.Float(0, 0); }
         @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
