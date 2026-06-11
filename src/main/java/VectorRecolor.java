@@ -46,7 +46,6 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
-                    // Step 1: Extract drawing paths directly drawn by the base engine
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
                     List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
@@ -59,7 +58,6 @@ public class VectorRecolor {
                     }
 
                     if (!visualBoxes.isEmpty()) {
-                        // Step 2: Extract text components via area mapping
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                         stripper.setSortByPosition(true);
 
@@ -77,7 +75,6 @@ public class VectorRecolor {
                             VisualBox box = visualBoxes.get(b);
                             String contentText = stripper.getTextForRegion("box_" + b).trim();
                             
-                            // --- FIX CRITERIA: A box is targeted if it's text-free OR fits narrow structural gap specifications ---
                             boolean isPureTextEmpty = contentText.isEmpty();
                             boolean isStructuralGapColumn = (box.bounds.width > 3.0f && box.bounds.width < 22.0f);
 
@@ -87,10 +84,10 @@ public class VectorRecolor {
                             }
                         }
 
-                        // Step 3: Execute spatial normalization flow algorithm
-                        NormalizationMetrics metrics = applyNormalization(visualBoxes);
+                        // Step 3: Run our updated Size-Matching Normalization engine
+                        NormalizationMetrics metrics = applySizeMatchedNormalization(visualBoxes);
 
-                        // Step 4: Write updated vector graphics onto the output stream
+                        // Step 4: Draw surviving structural grid lines
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -118,7 +115,6 @@ public class VectorRecolor {
                             }
                         }
 
-                        // Output real-time execution statistics to the action logging console
                         System.out.println(String.format("Page %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
                         System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
@@ -164,41 +160,52 @@ public class VectorRecolor {
         int totalLinesRemoved = 0;
     }
 
-    private static NormalizationMetrics applyNormalization(List<VisualBox> boxes) {
+    private static NormalizationMetrics applySizeMatchedNormalization(List<VisualBox> boxes) {
         NormalizationMetrics stats = new NormalizationMetrics();
+        
         float alignmentTolerance = 6.0f; 
+        float sizeMatchTolerance = 3.0f; // Delta for comparing matching heights/widths
 
         for (VisualBox target : boxes) {
             if (!target.isEmpty) continue; 
 
-            boolean flowLeftToRight = false;
-            boolean flowTopToBottom = false;
+            boolean hasHeightMatchedRowNeighbor = false;
+            boolean hasWidthMatchedColNeighbor = false;
 
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
-                // Check Horizontal Neighbor Flow (Row match verification)
-                if (Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance) {
-                    flowLeftToRight = true;
+                // 1. Evaluate Row Alignment Flow + Check if it shares a similar structural height
+                boolean isSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
+                boolean isSimilarHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
+                if (isSameRow && isSimilarHeight) {
+                    hasHeightMatchedRowNeighbor = true;
                 }
-                // Check Vertical Neighbor Flow (Column match verification)
-                if (Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance) {
-                    flowTopToBottom = true;
+
+                // 2. Evaluate Column Alignment Flow + Check if it shares a similar structural width
+                boolean isSameColumn = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
+                boolean isSimilarWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
+                if (isSameColumn && isSimilarWidth) {
+                    hasWidthMatchedColNeighbor = true;
                 }
             }
 
-            // Apply specific rules according to the flow matrix flags
-            if (flowLeftToRight && !flowTopToBottom) {
+            // Step 4: Fallback decision flow based on size-matched metrics
+            if (hasHeightMatchedRowNeighbor && !hasWidthMatchedColNeighbor) {
+                // Pure horizontal table layout behavior -> Wipe Left Line
                 target.drawLeft = false;
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved += 1;
-            } else if (flowTopToBottom && !flowLeftToRight) {
+            } else if (hasWidthMatchedColNeighbor && !hasHeightMatchedRowNeighbor) {
+                // Pure vertical column block layout behavior -> Wipe Top Line
                 target.drawTop = false;
                 stats.topToBottomCount++;
                 stats.totalLinesRemoved += 1;
-            } else if (flowLeftToRight && flowTopToBottom) {
+            } else if (hasHeightMatchedRowNeighbor && hasWidthMatchedColNeighbor) {
+                // Cross-grid intersection cell layout -> Keep all 4 walls intact
                 stats.bidirectionalCount++;
             } else {
+                // No matches found anywhere around -> Wiped completely
                 target.drawLeft = false;
                 target.drawTop = false;
                 target.drawRight = false;
@@ -214,13 +221,8 @@ public class VectorRecolor {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
 
-        protected DrawingBoxEngine(PDPage page) {
-            super(page);
-        }
-
-        public List<Rectangle2D> getDetectedBoxes() {
-            return detectedBoxes;
-        }
+        protected DrawingBoxEngine(PDPage page) { super(page); }
+        public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
 
         private void updateBounds(double x, double y) {
             if (minX == null) {
@@ -247,18 +249,12 @@ public class VectorRecolor {
             updateBounds(p2.getX(), p2.getY());
         }
 
-        @Override
-        public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
-
-        @Override
-        public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
-
-        @Override
-        public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
             updateBounds(x1, y1);
             updateBounds(x3, y3);
         }
-
         @Override public void strokePath() throws IOException { flushPath(); }
         @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
         @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
