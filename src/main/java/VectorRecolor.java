@@ -37,7 +37,7 @@ public class VectorRecolor {
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
             System.out.println("\n========================================================");
-            System.out.println("[START] Fast-Processing Structure for: " + inputFile.getName());
+            System.out.println("[START] Accurate Grid Parsing for: " + inputFile.getName());
             System.out.println("========================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -54,9 +54,9 @@ public class VectorRecolor {
                     List<Line2D> allLines = lineEngine.getExtractedLines();
                     System.out.println(String.format(" -> Extracted %d raw lines.", allLines.size()));
 
-                    // Step 2: High-speed structural cell generation
-                    List<VisualRect> visualBoxes = GridStructureParser.findVisualRectanglesOptimized(allLines);
-                    System.out.println(String.format(" -> Formed %d visual boxes in %d ms.", visualBoxes.size(), (System.currentTimeMillis() - startTime)));
+                    // Step 2: High-accuracy structural cell generation using physical intersections
+                    List<VisualRect> visualBoxes = GridStructureParser.findTrueIntersectingBoxes(allLines);
+                    System.out.println(String.format(" -> Formed %d true intersecting visual boxes in %d ms.", visualBoxes.size(), (System.currentTimeMillis() - startTime)));
 
                     if (!visualBoxes.isEmpty()) {
                         // Step 3: Text Content evaluation
@@ -66,8 +66,10 @@ public class VectorRecolor {
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             Rectangle2D.Float bounds = visualBoxes.get(b).bounds;
                             float awtY = pageHeight - bounds.y - bounds.height;
+                            
+                            // 1.5-point inward padding ensures we don't accidentally scan the border lines as text
                             stripper.addRegion("box_" + b, new Rectangle2D.Float(
-                                bounds.x + 1.0f, awtY + 1.0f, bounds.width - 2.0f, bounds.height - 2.0f
+                                bounds.x + 1.5f, awtY + 1.5f, bounds.width - 3.0f, bounds.height - 3.0f
                             ));
                         }
                         
@@ -170,16 +172,14 @@ public class VectorRecolor {
 
     private static class GridStructureParser {
         
-        // Optimized spatial sweep method running near O(N log N)
-        public static List<VisualRect> findVisualRectanglesOptimized(List<Line2D> lines) {
+        public static List<VisualRect> findTrueIntersectingBoxes(List<Line2D> lines) {
             List<VisualRect> rects = new ArrayList<>();
-            float tolerance = 4.0f;
+            float tolerance = 3.0f; // Snapping padding for slight line offsets
 
             List<Line2D> horiz = new ArrayList<>();
             List<Line2D> vert = new ArrayList<>();
             
             for (Line2D line : lines) {
-                // Normalize line segment point orders to simplify sweep comparisons
                 double x1 = Math.min(line.getX1(), line.getX2());
                 double x2 = Math.max(line.getX1(), line.getX2());
                 double y1 = Math.min(line.getY1(), line.getY2());
@@ -192,40 +192,23 @@ public class VectorRecolor {
                 }
             }
 
-            // Sort lines spatially to optimize searching
-            Collections.sort(horiz, (a, b) -> Double.compare(b.getY1(), a.getY1())); // Top-to-bottom
-            Collections.sort(vert, (a, b) -> Double.compare(a.getX1(), b.getX1()));   // Left-to-right
-
-            // Loop horizontally but restrict inner verification to overlapping line bounds
-            for (int i = 0; i < horiz.size(); i++) {
-                Line2D hTop = horiz.get(i);
-                
-                for (int j = i + 1; j < horiz.size(); j++) {
-                    Line2D hBot = horiz.get(j);
-                    
-                    // Break early if we've gone too far structurally vertically 
-                    if (hTop.getY1() - hBot.getY1() > 150.0) break; 
+            // High-precision verification: Confirm lines physically cross each other
+            for (Line2D hTop : horiz) {
+                for (Line2D hBot : horiz) {
                     if (hTop.getY1() <= hBot.getY1()) continue;
 
-                    // Locate vertical segments spanning across this specific row envelope
-                    List<Line2D> candidateVerts = new ArrayList<>();
-                    for (Line2D v : vert) {
-                        if (v.getY1() - tolerance <= hBot.getY1() && v.getY2() + tolerance >= hTop.getY1()) {
-                            // Check horizontal overlap boundaries
-                            double overlapLeft = Math.max(hTop.getX1(), hBot.getX1());
-                            double overlapRight = Math.min(hTop.getX2(), hBot.getX2());
-                            if (v.getX1() >= overlapLeft - tolerance && v.getX1() <= overlapRight + tolerance) {
-                                candidateVerts.add(v);
-                            }
-                        }
-                    }
+                    for (Line2D vLeft : vert) {
+                        // Vertical line must intersect both horizontal bars
+                        if (!lineIntersectsWithTolerance(hTop, vLeft, tolerance) || 
+                            !lineIntersectsWithTolerance(hBot, vLeft, tolerance)) continue;
 
-                    // Connect adjacent matching vertical columns inside this slice
-                    for (int k = 0; k < candidateVerts.size(); k++) {
-                        for (int m = k + 1; m < candidateVerts.size(); m++) {
-                            Line2D vLeft = candidateVerts.get(k);
-                            Line2D vRight = candidateVerts.get(m);
+                        for (Line2D vRight : vert) {
+                            if (vLeft.getX1() >= vRight.getX1()) continue;
+                            
+                            if (!lineIntersectsWithTolerance(hTop, vRight, tolerance) || 
+                                !lineIntersectsWithTolerance(hBot, vRight, tolerance)) continue;
 
+                            // All 4 lines successfully intersect to isolate a true closed visual rectangle
                             float minX = (float) vLeft.getX1();
                             float maxX = (float) vRight.getX1();
                             float minY = (float) hBot.getY1();
@@ -234,12 +217,13 @@ public class VectorRecolor {
                             float width = maxX - minX;
                             float height = maxY - minY;
 
-                            if (width > 4.0f && height > 4.0f) {
+                            if (width > 5.0f && height > 5.0f) {
                                 VisualRect detected = new VisualRect(minX, minY, width, height);
-                                if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
-                                                              && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
+                                // De-duplicate identical structures
+                                if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 2.0f 
+                                                              && Math.abs(r.bounds.y - detected.bounds.y) < 2.0f
+                                                              && Math.abs(r.bounds.width - detected.bounds.width) < 2.0f)) {
                                     rects.add(detected);
-                                    break; // Found immediate column bound, step to next
                                 }
                             }
                         }
@@ -247,6 +231,13 @@ public class VectorRecolor {
                 }
             }
             return rects;
+        }
+
+        // Helper to mathematically confirm if an infinite vertical line cross-section intercepts a horizontal bar segment
+        private static boolean lineIntersectsWithTolerance(Line2D hLine, Line2D vLine, float tolerance) {
+            boolean yInRange = (vLine.getY1() - tolerance <= hLine.getY1() && vLine.getY2() + tolerance >= hLine.getY1());
+            boolean xInRange = (vLine.getX1() >= hLine.getX1() - tolerance && vLine.getX1() <= hLine.getX2() + tolerance);
+            return yInRange && xInRange;
         }
 
         public static void applyNormalizationRules(List<VisualRect> boxes) {
