@@ -3,16 +3,19 @@ package main.java;
 import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.COSNumber;
+import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.text.PDFTextStripperByArea;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
 
-import java.awt.Color;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -44,7 +47,7 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
-                    // Pass 1: Extract layout cell coordinates
+                    // Pass 1: Extract layout cell coordinates cleanly
                     GeometryScanner scanner = new GeometryScanner(page);
                     scanner.processPage(page);
                     List<Rectangle2D> rawBoxes = scanner.getDetectedBoxes();
@@ -88,9 +91,8 @@ public class VectorRecolor {
                         System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Pass 2: Re-process the stream and mutate targeted segments into non-drawing moves
-                        SubPathPruningEngine pruningEngine = new SubPathPruningEngine(page, linesToKill);
-                        pruningEngine.processPage(page);
+                        // Pass 2: Low-Level Operator Token Stream Mutator (Completely avoids invalid super class issues)
+                        pruneStreamTokensAtCoordinates(page, linesToKill);
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
@@ -157,8 +159,8 @@ public class VectorRecolor {
             }
 
             if (immediateRowRepeat) {
-                // Tight precision filter window matching only the actual left vertical line boundary
-                killList.add(new Rectangle2D.Float(target.bounds.x - 0.5f, target.bounds.y - 0.5f, 1.0f, target.bounds.height + 1.0f));
+                // Precision vector exclusion bounding window matching only the target left vertical line frame
+                killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
                 
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved++;
@@ -168,82 +170,75 @@ public class VectorRecolor {
         return stats;
     }
 
-    // --- High-Precision Architecture: Atomic sub-path coordinator ---
-    private static class SubPathPruningEngine extends PDFGraphicsStreamEngine {
-        private final List<Rectangle2D.Float> targetMasks;
-        private Double currentX, currentY;
+    // --- Token Manipulation Token Stream Mutator Implementation ---
+    private static void pruneStreamTokensAtCoordinates(PDPage page, List<Rectangle2D.Float> targetMasks) throws IOException {
+        PDFStreamParser parser = new PDFStreamParser(page);
+        List<Object> finalTokens = new ArrayList<>();
+        
+        List<COSBase> arguments = new ArrayList<>();
+        Double lastCursorX = null;
+        Double lastCursorY = null;
 
-        protected SubPathPruningEngine(PDPage page, List<Rectangle2D.Float> targetMasks) {
-            super(page);
-            this.targetMasks = targetMasks;
-        }
+        Object token;
+        while ((token = parser.parseNextToken()) != null) {
+            if (token instanceof Operator) {
+                Operator op = (Operator) token;
+                String opName = op.getName();
 
-        private boolean shouldPruneSegment(double x0, double y0, double x1, double y1) {
-            double minX = Math.min(x0, x1);
-            double minY = Math.min(y0, y1);
-            double w = Math.max(Math.abs(x1 - x0), 0.5);
-            double h = Math.max(Math.abs(y1 - y0), 0.5);
-            Rectangle2D.Float segmentBounds = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
+                // Intercept and manipulate drawing subpaths dynamically
+                if (opName.equals("m") && arguments.size() >= 2) { // moveTo
+                    if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber) {
+                        lastCursorX = ((COSNumber) arguments.get(0)).doubleValue();
+                        lastCursorY = ((COSNumber) arguments.get(1)).doubleValue();
+                    }
+                } else if (opName.equals("l") && arguments.size() >= 2) { // lineTo
+                    if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber && lastCursorX != null && lastCursorY != null) {
+                        double targetX = ((COSNumber) arguments.get(0)).doubleValue();
+                        double targetY = ((COSNumber) arguments.get(1)).doubleValue();
+                        
+                        double minX = Math.min(lastCursorX, targetX);
+                        double minY = Math.min(lastCursorY, targetY);
+                        double w = Math.max(Math.abs(targetX - lastCursorX), 0.5);
+                        double h = Math.max(Math.abs(targetY - lastCursorY), 0.5);
+                        Rectangle2D.Float currentSegment = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
 
-            for (Rectangle2D.Float mask : targetMasks) {
-                if (mask.intersects(segmentBounds)) {
-                    return true; // Atomic vector intersection detected!
+                        boolean hitTargetLine = false;
+                        for (Rectangle2D.Float mask : targetMasks) {
+                            if (mask.intersects(currentSegment)) {
+                                hitTargetLine = true;
+                                break;
+                            }
+                        }
+
+                        if (hitTargetLine) {
+                            // Mutation: Change lineTo operator ('l') to moveTo operator ('m') to safely preserve path chains
+                            op = Operator.getOperator("m");
+                        }
+                        lastCursorX = targetX;
+                        lastCursorY = targetY;
+                    }
                 }
-            }
-            return false;
-        }
 
-        @Override
-        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
-            // Unroll compound rectangle primitives to evaluate their individual lines atomically
-            moveTo((float)p0.getX(), (float)p0.getY());
-            lineTo((float)p1.getX(), (float)p1.getY());
-            lineTo((float)p2.getX(), (float)p2.getY());
-            lineTo((float)p3.getX(), (float)p3.getY());
-            closePath();
-        }
-
-        @Override 
-        public void moveTo(float x, float y) throws IOException { 
-            currentX = (double)x; 
-            currentY = (double)y; 
-            super.moveTo(x, y);
-        }
-
-        @Override 
-        public void lineTo(float x, float y) throws IOException { 
-            if (currentX != null && currentY != null && shouldPruneSegment(currentX, currentY, x, y)) {
-                // Precision Mutator: Convert line drawing execution into a localized navigation jump
-                super.moveTo(x, y); 
+                // Write arguments followed by the updated operator
+                finalTokens.addAll(arguments);
+                finalTokens.add(op);
+                arguments.clear();
             } else {
-                super.lineTo(x, y);
+                arguments.add((COSBase) token);
             }
-            currentX = (double)x;
-            currentY = (double)y;
+        }
+        if (!arguments.isEmpty()) {
+            finalTokens.addAll(arguments);
         }
 
-        @Override 
-        public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
-            if (currentX != null && currentY != null && shouldPruneSegment(currentX, currentY, x3, y3)) {
-                super.moveTo(x3, y3);
-            } else {
-                super.curveTo(x1, y1, x2, y2, x3, y3);
-            }
-            currentX = (double)x3;
-            currentY = (double)y3;
+        // Flush modified layout tokens back into the page stream context
+        try (OutputStream os = page.getContents().createOutputStream()) {
+            org.apache.pdfbox.pdfwriter.ContentStreamWriter writer = new org.apache.pdfbox.pdfwriter.ContentStreamWriter(os);
+            writer.writeTokens(finalTokens);
         }
-
-        @Override public void strokePath() throws IOException { super.strokePath(); currentX = currentY = null; }
-        @Override public void fillPath(int windingRule) throws IOException { super.fillPath(windingRule); currentX = currentY = null; }
-        @Override public void fillAndStrokePath(int windingRule) throws IOException { super.fillAndStrokePath(windingRule); currentX = currentY = null; }
-        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
-        @Override public void clip(int windingRule) throws IOException { super.clip(windingRule); }
-        @Override public void closePath() throws IOException { super.closePath(); }
-        @Override public void endPath() throws IOException { super.endPath(); currentX = currentY = null; }
-        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
-        @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
 
+    // --- Clean geometry scanner tracking coordinate boxes correctly ---
     private static class GeometryScanner extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
