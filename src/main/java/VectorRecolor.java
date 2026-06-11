@@ -174,4 +174,130 @@ public class VectorRecolor {
         float sizeMatchTolerance = 2.0f;  
         float gapSearchLimit = 15.0f;     
 
-        for (int i
+        for (int i = 0; i < boxes.size(); i++) {
+            VisualBox target = boxes.get(i);
+            
+            target.drawLeft = true;
+            target.drawTop = true;
+            target.drawRight = true;
+            target.drawBottom = true;
+
+            if (!target.isEmpty) continue; 
+
+            System.out.print(String.format(" Box #%d [W=%.1f, H=%.1f] -> ", i, target.bounds.width, target.bounds.height));
+
+            boolean immediateRowRepeat = false;
+            boolean immediateColRepeat = false;
+
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+
+                boolean onSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
+                boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
+                
+                if (onSameRow && matchHeight) {
+                    float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
+                    float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
+                    
+                    if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
+                        (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
+                        immediateRowRepeat = true;
+                        break; 
+                    }
+                }
+            }
+
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+
+                boolean onSameCol = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
+                boolean matchWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
+
+                if (onSameCol && matchWidth) {
+                    float distanceAbove = target.bounds.y - (neighbor.bounds.y + neighbor.bounds.height);
+                    float distanceBelow = neighbor.bounds.y - (target.bounds.y + target.bounds.height);
+
+                    if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
+                        (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
+                        immediateColRepeat = true;
+                        break; 
+                    }
+                }
+            }
+
+            if (immediateRowRepeat && !immediateColRepeat) {
+                stats.leftToRightCount++;
+                stats.totalLinesIdentified += 1;
+                System.out.println("LOGGED: Continuous Row Flow (Identified Left Line)");
+            } else if (immediateColRepeat && !immediateRowRepeat) {
+                stats.topToBottomCount++;
+                stats.totalLinesIdentified += 1;
+                System.out.println("LOGGED: Continuous Column Stack (Identified Top Line)");
+            } else if (immediateRowRepeat && immediateColRepeat) {
+                if (target.bounds.width < 22.0f) {
+                    stats.leftToRightCount++;
+                    stats.totalLinesIdentified += 1;
+                    System.out.println("LOGGED (Narrow Override): Grid Cross Gap (Identified Left Line)");
+                } else {
+                    stats.bidirectionalCount++;
+                    System.out.println("LOGGED: Full Table Matrix Block (Kept Intact)");
+                }
+            } else {
+                stats.isolatedCount++;
+                stats.totalLinesIdentified += 4;
+                System.out.println("LOGGED: Isolated Box (Identified 4 Lines)");
+            }
+        }
+        return stats;
+    }
+
+    // Engine remains unmodified so text detection boundaries are 100% structurally safe
+    private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
+        private Double minX, minY, maxX, maxY;
+
+        protected DrawingBoxEngine(PDPage page) { super(page); }
+        public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
+
+        private void updateBounds(double x, double y) {
+            if (minX == null) {
+                minX = maxX = x;
+                minY = maxY = y;
+            } else {
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+        }
+
+        private void flushPath() {
+            if (minX != null) {
+                detectedBoxes.add(new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY));
+                minX = minY = maxX = maxY = null;
+            }
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
+            updateBounds(p0.getX(), p0.getY());
+            updateBounds(p2.getX(), p2.getY());
+        }
+
+        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            updateBounds(x1, y1);
+            updateBounds(x3, y3);
+        }
+        @Override public void strokePath() throws IOException { flushPath(); }
+        @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
+    }
+}
