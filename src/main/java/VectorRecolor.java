@@ -1,20 +1,17 @@
 package main.java;
 
-import org.apache.pdfbox.contentstream.operator.Operator;
-import org.apache.pdfbox.cos.COSArray;
-import org.apache.pdfbox.cos.COSFloat;
-import org.apache.pdfbox.cos.COSName;
-import org.apache.pdfbox.cos.COSNumber;
-import org.apache.pdfbox.pdfparser.PDFStreamParser;
-import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
+import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.common.PDStream;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
 
+import java.awt.Color;
+import java.awt.geom.Point2D;
+import java.awt.geom.Line2D;
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,111 +34,121 @@ public class VectorRecolor {
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
             System.out.println("\n------------------------------------------------");
-            System.out.println("Processing Stream Mutations: " + inputFile.getName());
+            System.out.println("Processing Line Objects: " + inputFile.getName());
             System.out.println("------------------------------------------------");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
-                    // Pass the document object down along with the page
-                    mutatePageStream(document, page);
+                    
+                    // Step 1: Extract all vector strokes into standalone Line2D objects
+                    LineExtractorEngine extractor = new LineExtractorEngine(page);
+                    extractor.processPage(page);
+                    List<Line2D> rawLines = extractor.getExtractedLines();
+
+                    if (!rawLines.isEmpty()) {
+                        List<Line2D> processedLines = new ArrayList<>();
+                        int shortenedCount = 0;
+
+                        // Step 2: Iterate over each line as an independent entity
+                        for (Line2D line : rawLines) {
+                            double x1 = line.getX1();
+                            double y1 = line.getY1();
+                            double x2 = line.getX2();
+                            double y2 = line.getY2();
+
+                            // TARGET RULE: Detect vertical lines (X coords match, Y delta > 4)
+                            boolean isVertical = Math.abs(x1 - x2) < 0.5;
+                            boolean isSubstantial = Math.abs(y1 - y2) > 4.0;
+
+                            if (isVertical && isSubstantial) {
+                                // Shorten the line's height to a minuscule 0.001 unit length
+                                double shortenedY2 = y1 + (y2 > y1 ? 0.001 : -0.001);
+                                processedLines.add(new Line2D.Double(x1, y1, x2, shortenedY2));
+                                shortenedCount++;
+                            } else {
+                                // Keep all other lines exactly as they are
+                                processedLines.add(line);
+                            }
+                        }
+
+                        System.out.println(String.format("  Page %d: Total lines = %d | Shortened vertical lines = %d", 
+                                i + 1, rawLines.size(), shortenedCount));
+
+                        // Step 3: Draw the updated lines back to the page as distinct green vector primitives
+                        try (PDPageContentStream contentStream = new PDPageContentStream(
+                                document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+                            
+                            contentStream.setStrokingColor(Color.GREEN);
+                            contentStream.setLineWidth(1.0f);
+
+                            for (Line2D cleanLine : processedLines) {
+                                contentStream.moveTo((float) cleanLine.getX1(), (float) cleanLine.getY1());
+                                contentStream.lineTo((float) cleanLine.getX2(), (float) cleanLine.getY2());
+                                contentStream.stroke();
+                            }
+                        }
+                    } else {
+                        System.out.println(String.format("  Page %d: No vector paths detected.", i + 1));
+                    }
                 }
+
                 document.save(outputFile);
-                System.out.println(" -> Successfully mutated and saved: " + outputFile.getAbsolutePath());
+                System.out.println(" -> Successfully updated and saved: " + outputFile.getAbsolutePath());
             } catch (IOException e) {
-                System.err.println("Error mutating " + inputFile.getName() + ": " + e.getMessage());
+                System.err.println("Error processing " + inputFile.getName() + ": " + e.getMessage());
             }
         }
     }
 
-    private static void mutatePageStream(PDDocument document, PDPage page) throws IOException {
-        PDFStreamParser parser = new PDFStreamParser(page);
-        List<Object> tokens = parser.parse();
-        List<Object> newTokens = new ArrayList<>();
+    // High-Precision Graphics Engine that safely breaks continuous shapes down into standalone lines
+    private static class LineExtractorEngine extends PDFGraphicsStreamEngine {
+        private final List<Line2D> extractedLines = new ArrayList<>();
+        private Point2D currentPoint = new Point2D.Float(0, 0);
 
-        Float lastX = null;
-        Float lastY = null;
-        int mutationCount = 0;
-
-        for (int j = 0; j < tokens.size(); j++) {
-            Object token = tokens.get(j);
-
-            if (token instanceof Operator) {
-                Operator op = (Operator) token;
-                String opName = op.getName();
-
-                // 'm' defines a moveTo operation (sets the starting anchor point)
-                if (opName.equals("m") && j >= 2) {
-                    Object xToken = tokens.get(j - 2);
-                    Object yToken = tokens.get(j - 1);
-                    if (xToken instanceof COSNumber && yToken instanceof COSNumber) {
-                        lastX = ((COSNumber) xToken).floatValue();
-                        lastY = ((COSNumber) yToken).floatValue();
-                    }
-                }
-                
-                // 'l' defines a lineTo operation (draws a segment from last anchor point)
-                else if (opName.equals("l") && j >= 2 && lastX != null && lastY != null) {
-                    Object xToken = tokens.get(j - 2);
-                    Object yToken = tokens.get(j - 1);
-
-                    if (xToken instanceof COSNumber && yToken instanceof COSNumber) {
-                        float targetX = ((COSNumber) xToken).floatValue();
-                        float targetY = ((COSNumber) yToken).floatValue();
-
-                        // TARGET RULE: Detect vertical grid lines (X matches, Y changes)
-                        boolean isVerticalLine = Math.abs(targetX - lastX) < 0.5f;
-                        boolean isSubstantial = Math.abs(targetY - lastY) > 4.0f;
-
-                        if (isVerticalLine && isSubstantial) {
-                            // Shorten the height down to a nominal 0.001 delta in-place
-                            float shortenedY = lastY + (targetY > lastY ? 0.001f : -0.001f);
-                            
-                            // Mutate arguments safely in the array back-stack
-                            newTokens.set(newTokens.size() - 2, new COSFloat(targetX));
-                            newTokens.set(newTokens.size() - 1, new COSFloat(shortenedY));
-                            
-                            mutationCount++;
-                            
-                            lastX = targetX;
-                            lastY = shortenedY;
-                            newTokens.add(token);
-                            continue;
-                        }
-
-                        lastX = targetX;
-                        lastY = targetY;
-                    }
-                }
-                
-                // 're' defines a rectangle primitive directly [x, y, width, height]
-                else if (opName.equals("re") && j >= 4) {
-                    Object wToken = tokens.get(j - 2);
-                    Object hToken = tokens.get(j - 1);
-                    
-                    if (wToken instanceof COSNumber && hToken instanceof COSNumber) {
-                        float w = ((COSNumber) wToken).floatValue();
-                        
-                        // If this rectangle matches a narrow structural layout gap border
-                        if (w > 3.0f && w < 22.0f) {
-                            newTokens.set(newTokens.size() - 1, new COSFloat(0.001f));
-                            mutationCount++;
-                        }
-                    }
-                }
-            }
-            newTokens.add(token);
+        protected LineExtractorEngine(PDPage page) { 
+            super(page); 
         }
 
-        // Flush and overwrite using the corrected PDDocument reference
-        if (mutationCount > 0) {
-            PDStream updatedStream = new PDStream(document);
-            try (OutputStream os = updatedStream.createOutputStream(COSName.FLATE_DECODE)) {
-                ContentStreamWriter writer = new ContentStreamWriter(os);
-                writer.writeTokens(newTokens);
-            }
-            page.setContents(updatedStream);
-            System.out.println(String.format("  -> Successfully mutated %d vector layout primitives directly in stream.", mutationCount));
+        public List<Line2D> getExtractedLines() { 
+            return extractedLines; 
         }
+
+        @Override
+        public void moveTo(float x, float y) { 
+            this.currentPoint = new Point2D.Float(x, y); 
+        }
+
+        @Override
+        public void lineTo(float x, float y) {
+            // Break the stroke into its own individual object entry
+            extractedLines.add(new Line2D.Float((float) currentPoint.getX(), (float) currentPoint.getY(), x, y));
+            this.currentPoint = new Point2D.Float(x, y);
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) {
+            // Deconstruct an entire rectangle primitive into 4 independent, isolated line segments
+            extractedLines.add(new Line2D.Double(p0, p1));
+            extractedLines.add(new Line2D.Double(p1, p2));
+            extractedLines.add(new Line2D.Double(p2, p3));
+            extractedLines.add(new Line2D.Double(p3, p0));
+        }
+
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) {
+            // Convert curves to a straight anchor line segment for linear structural processing
+            extractedLines.add(new Line2D.Float((float) currentPoint.getX(), (float) currentPoint.getY(), x3, y3));
+            this.currentPoint = new Point2D.Float(x3, y3);
+        }
+
+        @Override public void strokePath() {}
+        @Override public void fillPath(int windingRule) {}
+        @Override public void fillAndStrokePath(int windingRule) {}
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) {}
+        @Override public void clip(int windingRule) {}
+        @Override public void closePath() {}
+        @Override public void endPath() {}
+        @Override public Point2D getCurrentPoint() { return currentPoint; }
+        @Override public void shadingFill(COSName shadingName) {}
     }
 }
