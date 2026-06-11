@@ -46,49 +46,51 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
-                    // Step 1: Capture the exact boxes your original engine would draw
+                    // Step 1: Extract drawing paths directly drawn by the base engine
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
                     List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
 
-                    // Map raw rectangles to our structured VisualBox representation
                     List<VisualBox> visualBoxes = new ArrayList<>();
                     for (Rectangle2D rb : rawBoxes) {
-                        // Exclude microscopic rendering artifacts or lines drawn directly over each other
-                        if (rb.getWidth() > 4.0 && rb.getHeight() > 4.0) {
+                        if (rb.getWidth() > 2.0 && rb.getHeight() > 4.0) {
                             visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
                         }
                     }
 
                     if (!visualBoxes.isEmpty()) {
-                        // Step 2: Use PDFTextStripperByArea to check for internal text content
+                        // Step 2: Extract text components via area mapping
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                         stripper.setSortByPosition(true);
 
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             Rectangle2D.Float bnd = visualBoxes.get(b).bounds;
-                            // Convert PDF coordinate space to standard AWT screen space
                             float awtY = pageHeight - bnd.y - bnd.height;
-                            // Give it a 1.5pt safety inset so text right next to lines isn't missed
                             stripper.addRegion("box_" + b, new Rectangle2D.Float(
-                                    bnd.x + 1.5f, awtY + 1.5f, bnd.width - 3.0f, bnd.height - 3.0f));
+                                    bnd.x + 1.0f, awtY + 1.0f, bnd.width - 2.0f, bnd.height - 2.0f));
                         }
 
                         stripper.extractRegions(page);
 
-                        int emptyCount = 0;
+                        int targetedEmptyCount = 0;
                         for (int b = 0; b < visualBoxes.size(); b++) {
+                            VisualBox box = visualBoxes.get(b);
                             String contentText = stripper.getTextForRegion("box_" + b).trim();
-                            if (contentText.isEmpty()) {
-                                visualBoxes.get(b).isEmpty = true;
-                                emptyCount++;
+                            
+                            // --- FIX CRITERIA: A box is targeted if it's text-free OR fits narrow structural gap specifications ---
+                            boolean isPureTextEmpty = contentText.isEmpty();
+                            boolean isStructuralGapColumn = (box.bounds.width > 3.0f && box.bounds.width < 22.0f);
+
+                            if (isPureTextEmpty || isStructuralGapColumn) {
+                                box.isEmpty = true;
+                                targetedEmptyCount++;
                             }
                         }
 
-                        // Step 3: Run spatial flow normalization over the restricted boxes
+                        // Step 3: Execute spatial normalization flow algorithm
                         NormalizationMetrics metrics = applyNormalization(visualBoxes);
 
-                        // Step 4: Render the normalized structures back out to the page stream
+                        // Step 4: Write updated vector graphics onto the output stream
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -116,15 +118,15 @@ public class VectorRecolor {
                             }
                         }
 
-                        // Print detailed diagnostics to GitHub Action log output console
+                        // Output real-time execution statistics to the action logging console
                         System.out.println(String.format("Page %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
-                        System.out.println(String.format("  -> Empty Boxes Detected: %d", emptyCount));
+                        System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
                         System.out.println(String.format("  -> Left-to-Right Flow Normalization (Removed Left Line): %d", metrics.leftToRightCount));
                         System.out.println(String.format("  -> Top-to-Bottom Flow Normalization (Removed Top Line): %d", metrics.topToBottomCount));
                         System.out.println(String.format("  -> Bidirectional Table Flow (No lines altered): %d", metrics.bidirectionalCount));
                         System.out.println(String.format("  -> Completely Isolated Layout Boxes (Wiped all 4 Lines): %d", metrics.isolatedCount));
-                        System.out.println(String.format("  -> Total Grid Lines Removed: %d", metrics.totalLinesRemoved));
+                        System.out.println(String.format("  -> Total Grid Lines Safely Removed: %d", metrics.totalLinesRemoved));
                     } else {
                         System.out.println(String.format("Page %d: No drawn outline boxes were recorded.", i + 1));
                     }
@@ -164,10 +166,10 @@ public class VectorRecolor {
 
     private static NormalizationMetrics applyNormalization(List<VisualBox> boxes) {
         NormalizationMetrics stats = new NormalizationMetrics();
-        float alignmentTolerance = 6.0f; // Snapping limits for aligning neighbors
+        float alignmentTolerance = 6.0f; 
 
         for (VisualBox target : boxes) {
-            if (!target.isEmpty) continue; // Only process empty visual boxes
+            if (!target.isEmpty) continue; 
 
             boolean flowLeftToRight = false;
             boolean flowTopToBottom = false;
@@ -175,17 +177,17 @@ public class VectorRecolor {
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
-                // Check Horizontal Neighbor Flow (shares row bounds)
+                // Check Horizontal Neighbor Flow (Row match verification)
                 if (Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance) {
                     flowLeftToRight = true;
                 }
-                // Check Vertical Neighbor Flow (shares column bounds)
+                // Check Vertical Neighbor Flow (Column match verification)
                 if (Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance) {
                     flowTopToBottom = true;
                 }
             }
 
-            // Implement Rule Options based on Flow State Matrix
+            // Apply specific rules according to the flow matrix flags
             if (flowLeftToRight && !flowTopToBottom) {
                 target.drawLeft = false;
                 stats.leftToRightCount++;
@@ -196,9 +198,7 @@ public class VectorRecolor {
                 stats.totalLinesRemoved += 1;
             } else if (flowLeftToRight && flowTopToBottom) {
                 stats.bidirectionalCount++;
-                // Both flows found -> Keep all 4 lines completely intact
             } else {
-                // Completely Isolated Box -> Clear all 4 lines
                 target.drawLeft = false;
                 target.drawTop = false;
                 target.drawRight = false;
@@ -210,7 +210,6 @@ public class VectorRecolor {
         return stats;
     }
 
-    // Back to your original, clean engine that successfully maps drawing path boxes
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
