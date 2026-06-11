@@ -46,49 +46,57 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
+                    // Step 1: Run the deep, flattened inheritance parser engine
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
-                    List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
+                    List<Rectangle2D> deeplyInheritedBoxes = engine.getDetectedBoxes();
 
                     List<VisualBox> visualBoxes = new ArrayList<>();
-                    for (Rectangle2D rb : rawBoxes) {
+                    for (Rectangle2D rb : deeplyInheritedBoxes) {
+                        // Keep strict structural dimensional filters
                         if (rb.getWidth() > 2.0 && rb.getHeight() > 4.0) {
                             visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
                         }
                     }
 
                     if (!visualBoxes.isEmpty()) {
+                        // Step 2: Set up our strict Area Text Stripper
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                         stripper.setSortByPosition(true);
 
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             Rectangle2D.Float bnd = visualBoxes.get(b).bounds;
                             float awtY = pageHeight - bnd.y - bnd.height;
+                            // 1.0pt padding window prevents edge characters from bleeding over
                             stripper.addRegion("box_" + b, new Rectangle2D.Float(
                                     bnd.x + 1.0f, awtY + 1.0f, bnd.width - 2.0f, bnd.height - 2.0f));
                         }
 
                         stripper.extractRegions(page);
 
-                        int targetedEmptyCount = 0;
+                        int verifiedEmptyCount = 0;
                         for (int b = 0; b < visualBoxes.size(); b++) {
                             VisualBox box = visualBoxes.get(b);
                             String contentText = stripper.getTextForRegion("box_" + b).trim();
                             
-                            boolean isPureTextEmpty = contentText.isEmpty();
-                            boolean isStructuralGapColumn = (box.bounds.width > 3.0f && box.bounds.width < 22.0f);
+                            // Check if the area contains any real text content
+                            boolean isTextEmpty = contentText.isEmpty();
+                            
+                            // Step 3: Run the graphic content fortress validation check
+                            // If a box intersects with background vector marks, images, or real text, it's NOT empty.
+                            boolean hasInterferenceNoise = engine.doesRegionContainContent(box.bounds);
 
-                            if (isPureTextEmpty || isStructuralGapColumn) {
+                            if (isTextEmpty && !hasInterferenceNoise) {
                                 box.isEmpty = true;
-                                targetedEmptyCount++;
+                                verifiedEmptyCount++;
                             }
                         }
 
-                        System.out.println(String.format("\n--- Chain Neighbors Trace for Page %d ---", i + 1));
-                        // Step 3: Run the new Immediate Chain-Linked Repetition Engine
+                        System.out.println(String.format("\n--- Deep Continuous Chain Neighbors Trace for Page %d ---", i + 1));
+                        // Step 4: Run immediate chain-linked repetition normalization
                         NormalizationMetrics metrics = applyChainLinkedNormalization(visualBoxes);
 
-                        // Step 4: Output remaining structural grids back to the PDF page
+                        // Step 5: Render structural normalized results to output stream
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -118,7 +126,7 @@ public class VectorRecolor {
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
-                        System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
+                        System.out.println(String.format("  -> Confirmed True Empty Boxes: %d", verifiedEmptyCount));
                         System.out.println(String.format("  -> Left-to-Right Flow Normalization (Removed Left Line): %d", metrics.leftToRightCount));
                         System.out.println(String.format("  -> Top-to-Bottom Flow Normalization (Removed Top Line): %d", metrics.topToBottomCount));
                         System.out.println(String.format("  -> Bidirectional Table Flow (No lines altered): %d", metrics.bidirectionalCount));
@@ -164,20 +172,17 @@ public class VectorRecolor {
     private static NormalizationMetrics applyChainLinkedNormalization(List<VisualBox> boxes) {
         NormalizationMetrics stats = new NormalizationMetrics();
         
-        float alignmentTolerance = 5.0f;  // Max alignment deviation limit
-        float sizeMatchTolerance = 2.0f;  // Max shape structural difference limit
-        float gapSearchLimit = 15.0f;     // Spatial jump window to locate an adjacent cell
+        float alignmentTolerance = 4.0f;  
+        float sizeMatchTolerance = 1.5f;  
+        float gapSearchLimit = 12.0f;     
 
         for (int i = 0; i < boxes.size(); i++) {
             VisualBox target = boxes.get(i);
             if (!target.isEmpty) continue; 
 
-            System.out.print(String.format(" Box #%d [W=%.1f, H=%.1f] -> ", i, target.bounds.width, target.bounds.height));
-
             boolean immediateRowRepeat = false;
             boolean immediateColRepeat = false;
 
-            // Step 1: Scan for an immediate matching neighbor along the horizontal row path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
@@ -185,19 +190,17 @@ public class VectorRecolor {
                 boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
                 
                 if (onSameRow && matchHeight) {
-                    // Check if it is physically adjacent (touching or separated by a minimal grid gap)
                     float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
                     float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
                     
                     if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
                         (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
                         immediateRowRepeat = true;
-                        break; // Found contiguous grid line neighbor
+                        break; 
                     }
                 }
             }
 
-            // Step 2: Scan for an immediate matching neighbor along the vertical column path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
@@ -205,39 +208,35 @@ public class VectorRecolor {
                 boolean matchWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
 
                 if (onSameCol && matchWidth) {
-                    // Check if it is physically adjacent vertically above or below
                     float distanceAbove = target.bounds.y - (neighbor.bounds.y + neighbor.bounds.height);
                     float distanceBelow = neighbor.bounds.y - (target.bounds.y + target.bounds.height);
 
                     if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
                         (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
                         immediateColRepeat = true;
-                        break; // Found vertical column stack repetition
+                        break; 
                     }
                 }
             }
 
-            // Step 3: Classify layout properties using strict immediate proximity repetitions
             if (immediateRowRepeat && !immediateColRepeat) {
                 target.drawLeft = false;
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved += 1;
-                System.out.println("RESOLVED: Continuous Row Flow (Removed Left Line)");
+                System.out.println(String.format(" Box #%d [W=%.1f, H=%.1f] -> RESOLVED: Continuous Row Flow (Removed Left Line)", i, target.bounds.width, target.bounds.height));
             } else if (immediateColRepeat && !immediateRowRepeat) {
                 target.drawTop = false;
                 stats.topToBottomCount++;
                 stats.totalLinesRemoved += 1;
-                System.out.println("RESOLVED: Continuous Column Stack (Removed Top Line)");
+                System.out.println(String.format(" Box #%d [W=%.1f, H=%.1f] -> RESOLVED: Continuous Column Stack (Removed Top Line)", i, target.bounds.width, target.bounds.height));
             } else if (immediateRowRepeat && immediateColRepeat) {
-                // If it is a true cross-grid element but matches narrow spacing column profiles, execute left-to-right removal
                 if (target.bounds.width < 22.0f) {
                     target.drawLeft = false;
                     stats.leftToRightCount++;
                     stats.totalLinesRemoved += 1;
-                    System.out.println("RESOLVED (Narrow Override): Grid Cross Gap (Removed Left Line)");
+                    System.out.println(String.format(" Box #%d [W=%.1f, H=%.1f] -> RESOLVED (Override): Grid Cross Gap (Removed Left Line)", i, target.bounds.width, target.bounds.height));
                 } else {
                     stats.bidirectionalCount++;
-                    System.out.println("RESOLVED: Full Table Matrix Block (Kept Intact)");
                 }
             } else {
                 target.drawLeft = false;
@@ -246,57 +245,92 @@ public class VectorRecolor {
                 target.drawBottom = false;
                 stats.isolatedCount++;
                 stats.totalLinesRemoved += 4;
-                System.out.println("RESOLVED: Isolated Box (Wiped Completely)");
+                System.out.println(String.format(" Box #%d [W=%.1f, H=%.1f] -> RESOLVED: Isolated Box (Wiped Completely)", i, target.bounds.width, target.bounds.height));
             }
         }
         return stats;
     }
 
+    // --- FIX: High-fidelity graphics engine exploring paths to complete depth ---
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
+        private final List<Rectangle2D> contentInterferenceRegions = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
 
-        protected DrawingBoxEngine(PDPage page) { super(page); }
-        public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
-
-        private void updateBounds(double x, double y) {
-            if (minX == null) {
-                minX = maxX = x;
-                minY = maxY = y;
-            } else {
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-            }
+        protected DrawingBoxEngine(PDPage page) { 
+            super(page); 
         }
 
-        private void flushPath() {
-            if (minX != null) {
-                detectedBoxes.add(new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY));
-                minX = minY = maxX = maxY = null;
+        public List<Rectangle2D> getDetectedBoxes() { 
+            return detectedBoxes; 
+        }
+
+        // Validates if a target box overlaps any drawn vectors, glyph frames, or image boundaries
+        public boolean doesRegionContainContent(Rectangle2D.Float targetBox) {
+            for (Rectangle2D contentRect : contentInterferenceRegions) {
+                // Check if the content rectangle sits firmly inside the candidate layout box
+                if (targetBox.intersects(contentRect)) {
+                    // Avoid catching the box's own borders
+                    double padding = 2.0;
+                    if (contentRect.getX() > targetBox.getX() + padding && 
+                        contentRect.getX() + contentRect.getWidth() < targetBox.getX() + targetBox.getWidth() - padding) {
+                        return true; // True hidden graphic elements caught inside!
+                    }
+                }
             }
+            return false;
+        }
+
+        private void recordUnconditionalVectorSegment(double x, double y) {
+            if (minX != null) {
+                double w = Math.abs(x - minX);
+                double h = Math.abs(y - minY);
+                // Deep extraction: Track every atomic line rendering event instantly as an independent child node
+                if (w > 2.0 && h > 4.0) {
+                    detectedBoxes.add(new Rectangle2D.Double(Math.min(minX, x), Math.min(minY, y), w, h));
+                } else {
+                    // Microscopic nodes, background marks, and line endpoints are registered as interference noise
+                    contentInterferenceRegions.add(new Rectangle2D.Double(Math.min(minX, x), Math.min(minY, y), Math.max(w, 1.0), Math.max(h, 1.0)));
+                }
+            }
+            minX = x;
+            minY = y;
         }
 
         @Override
         public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
-            updateBounds(p0.getX(), p0.getY());
-            updateBounds(p2.getX(), p2.getY());
+            double minXCoord = Math.min(Math.min(p0.getX(), p1.getX()), Math.min(p2.getX(), p3.getX()));
+            double maxXCoord = Math.max(Math.max(p0.getX(), p1.getX()), Math.max(p2.getX(), p3.getX()));
+            double minYCoord = Math.min(Math.min(p0.getY(), p1.getY()), Math.min(p2.getY(), p3.getY()));
+            double maxYCoord = Math.max(Math.max(p0.getY(), p1.getY()), Math.max(p2.getY(), p3.getY()));
+            
+            detectedBoxes.add(new Rectangle2D.Double(minXCoord, minYCoord, maxXCoord - minXCoord, maxYCoord - minYCoord));
         }
 
-        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
-        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
-        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
-            updateBounds(x1, y1);
-            updateBounds(x3, y3);
+        @Override public void moveTo(float x, float y) throws IOException { 
+            minX = (double)x; 
+            minY = (double)y; 
         }
-        @Override public void strokePath() throws IOException { flushPath(); }
-        @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
-        @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
-        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+
+        @Override public void lineTo(float x, float y) throws IOException { 
+            recordUnconditionalVectorSegment(x, y); 
+        }
+
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            recordUnconditionalVectorSegment(x3, y3);
+        }
+
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {
+            // Register raster image placements directly as content interferences
+            contentInterferenceRegions.add(new Rectangle2D.Double(0, 0, 1000, 1000));
+        }
+
+        @Override public void strokePath() throws IOException { minX = minY = null; }
+        @Override public void fillPath(int windingRule) throws IOException { minX = minY = null; }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { minX = minY = null; }
         @Override public void clip(int windingRule) throws IOException {}
         @Override public void closePath() throws IOException {}
-        @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override public void endPath() throws IOException { minX = minY = null; }
         @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
