@@ -4,7 +4,8 @@ import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.cos.COSName; // <-- Added import for the missing method
+import org.apache.pdfbox.text.PDFTextStripperByArea;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
 
 import java.awt.Color;
@@ -35,36 +36,103 @@ public class VectorRecolor {
         }
 
         for (File inputFile : files) {
-            File outputFile = new File(outputDir, "drawings_only_" + inputFile.getName());
-            System.out.println("Processing: " + inputFile.getName() + "...");
+            File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
+            System.out.println("\n------------------------------------------------");
+            System.out.println("Processing File: " + inputFile.getName());
+            System.out.println("------------------------------------------------");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
+                    float pageHeight = page.getMediaBox().getHeight();
                     
+                    // Step 1: Capture the exact boxes your original engine would draw
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
-                    List<Rectangle2D> vectorBoxes = engine.getDetectedBoxes();
+                    List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
 
-                    if (!vectorBoxes.isEmpty()) {
+                    // Map raw rectangles to our structured VisualBox representation
+                    List<VisualBox> visualBoxes = new ArrayList<>();
+                    for (Rectangle2D rb : rawBoxes) {
+                        // Exclude microscopic rendering artifacts or lines drawn directly over each other
+                        if (rb.getWidth() > 4.0 && rb.getHeight() > 4.0) {
+                            visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
+                        }
+                    }
+
+                    if (!visualBoxes.isEmpty()) {
+                        // Step 2: Use PDFTextStripperByArea to check for internal text content
+                        PDFTextStripperByArea stripper = new PDFTextStripperByArea();
+                        stripper.setSortByPosition(true);
+
+                        for (int b = 0; b < visualBoxes.size(); b++) {
+                            Rectangle2D.Float bnd = visualBoxes.get(b).bounds;
+                            // Convert PDF coordinate space to standard AWT screen space
+                            float awtY = pageHeight - bnd.y - bnd.height;
+                            // Give it a 1.5pt safety inset so text right next to lines isn't missed
+                            stripper.addRegion("box_" + b, new Rectangle2D.Float(
+                                    bnd.x + 1.5f, awtY + 1.5f, bnd.width - 3.0f, bnd.height - 3.0f));
+                        }
+
+                        stripper.extractRegions(page);
+
+                        int emptyCount = 0;
+                        for (int b = 0; b < visualBoxes.size(); b++) {
+                            String contentText = stripper.getTextForRegion("box_" + b).trim();
+                            if (contentText.isEmpty()) {
+                                visualBoxes.get(b).isEmpty = true;
+                                emptyCount++;
+                            }
+                        }
+
+                        // Step 3: Run spatial flow normalization over the restricted boxes
+                        NormalizationMetrics metrics = applyNormalization(visualBoxes);
+
+                        // Step 4: Render the normalized structures back out to the page stream
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
                             contentStream.setStrokingColor(Color.GREEN);
                             contentStream.setLineWidth(1.0f);
 
-                            for (Rectangle2D rect : vectorBoxes) {
-                                contentStream.addRect((float) rect.getX(), (float) rect.getY(), 
-                                                      (float) rect.getWidth(), (float) rect.getHeight());
+                            for (VisualBox box : visualBoxes) {
+                                if (box.drawLeft) {
+                                    contentStream.moveTo(box.bounds.x, box.bounds.y);
+                                    contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
+                                }
+                                if (box.drawTop) {
+                                    contentStream.moveTo(box.bounds.x, box.bounds.y + box.bounds.height);
+                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
+                                }
+                                if (box.drawRight) {
+                                    contentStream.moveTo(box.bounds.x + box.bounds.width, box.bounds.y);
+                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
+                                }
+                                if (box.drawBottom) {
+                                    contentStream.moveTo(box.bounds.x, box.bounds.y);
+                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y);
+                                }
                                 contentStream.stroke();
                             }
                         }
+
+                        // Print detailed diagnostics to GitHub Action log output console
+                        System.out.println(String.format("Page %d Analysis Metrics Report:", i + 1));
+                        System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
+                        System.out.println(String.format("  -> Empty Boxes Detected: %d", emptyCount));
+                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Removed Left Line): %d", metrics.leftToRightCount));
+                        System.out.println(String.format("  -> Top-to-Bottom Flow Normalization (Removed Top Line): %d", metrics.topToBottomCount));
+                        System.out.println(String.format("  -> Bidirectional Table Flow (No lines altered): %d", metrics.bidirectionalCount));
+                        System.out.println(String.format("  -> Completely Isolated Layout Boxes (Wiped all 4 Lines): %d", metrics.isolatedCount));
+                        System.out.println(String.format("  -> Total Grid Lines Removed: %d", metrics.totalLinesRemoved));
+                    } else {
+                        System.out.println(String.format("Page %d: No drawn outline boxes were recorded.", i + 1));
                     }
                 }
 
                 if (SAVE_DRAWINGS_ONLY) {
                     document.save(outputFile);
-                    System.out.println(" -> Saved to: " + outputFile.getAbsolutePath());
+                    System.out.println(" -> Successfully saved output to: " + outputFile.getAbsolutePath());
                 }
 
             } catch (IOException e) {
@@ -73,6 +141,76 @@ public class VectorRecolor {
         }
     }
 
+    private static class VisualBox {
+        Rectangle2D.Float bounds;
+        boolean isEmpty = false;
+        boolean drawLeft = true;
+        boolean drawTop = true;
+        boolean drawRight = true;
+        boolean drawBottom = true;
+
+        VisualBox(float x, float y, float w, float h) {
+            this.bounds = new Rectangle2D.Float(x, y, w, h);
+        }
+    }
+
+    private static class NormalizationMetrics {
+        int leftToRightCount = 0;
+        int topToBottomCount = 0;
+        int bidirectionalCount = 0;
+        int isolatedCount = 0;
+        int totalLinesRemoved = 0;
+    }
+
+    private static NormalizationMetrics applyNormalization(List<VisualBox> boxes) {
+        NormalizationMetrics stats = new NormalizationMetrics();
+        float alignmentTolerance = 6.0f; // Snapping limits for aligning neighbors
+
+        for (VisualBox target : boxes) {
+            if (!target.isEmpty) continue; // Only process empty visual boxes
+
+            boolean flowLeftToRight = false;
+            boolean flowTopToBottom = false;
+
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+
+                // Check Horizontal Neighbor Flow (shares row bounds)
+                if (Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance) {
+                    flowLeftToRight = true;
+                }
+                // Check Vertical Neighbor Flow (shares column bounds)
+                if (Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance) {
+                    flowTopToBottom = true;
+                }
+            }
+
+            // Implement Rule Options based on Flow State Matrix
+            if (flowLeftToRight && !flowTopToBottom) {
+                target.drawLeft = false;
+                stats.leftToRightCount++;
+                stats.totalLinesRemoved += 1;
+            } else if (flowTopToBottom && !flowLeftToRight) {
+                target.drawTop = false;
+                stats.topToBottomCount++;
+                stats.totalLinesRemoved += 1;
+            } else if (flowLeftToRight && flowTopToBottom) {
+                stats.bidirectionalCount++;
+                // Both flows found -> Keep all 4 lines completely intact
+            } else {
+                // Completely Isolated Box -> Clear all 4 lines
+                target.drawLeft = false;
+                target.drawTop = false;
+                target.drawRight = false;
+                target.drawBottom = false;
+                stats.isolatedCount++;
+                stats.totalLinesRemoved += 4;
+            }
+        }
+        return stats;
+    }
+
+    // Back to your original, clean engine that successfully maps drawing path boxes
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
@@ -122,34 +260,14 @@ public class VectorRecolor {
             updateBounds(x3, y3);
         }
 
-        @Override
-        public void strokePath() throws IOException { flushPath(); }
-
-        @Override
-        public void fillPath(int windingRule) throws IOException { flushPath(); }
-
-        @Override
-        public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
-
-        @Override
-        public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
-
-        @Override
-        public void clip(int windingRule) throws IOException { }
-
-        @Override
-        public void closePath() throws IOException { }
-
-        @Override
-        public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
-
-        @Override
-        public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
-
-        // --- THE FIX: Implementing the missing abstract method ---
-        @Override
-        public void shadingFill(COSName shadingName) throws IOException {
-            // Left empty intentionally as we are only tracking vector outlines
-        }
+        @Override public void strokePath() throws IOException { flushPath(); }
+        @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
 }
