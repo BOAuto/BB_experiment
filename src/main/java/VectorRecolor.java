@@ -84,10 +84,11 @@ public class VectorRecolor {
                             }
                         }
 
-                        // Step 3: Run our updated Size-Matching Normalization engine
-                        NormalizationMetrics metrics = applySizeMatchedNormalization(visualBoxes);
+                        System.out.println(String.format("\n--- Chain Neighbors Trace for Page %d ---", i + 1));
+                        // Step 3: Run the new Immediate Chain-Linked Repetition Engine
+                        NormalizationMetrics metrics = applyChainLinkedNormalization(visualBoxes);
 
-                        // Step 4: Draw surviving structural grid lines
+                        // Step 4: Output remaining structural grids back to the PDF page
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -115,7 +116,7 @@ public class VectorRecolor {
                             }
                         }
 
-                        System.out.println(String.format("Page %d Analysis Metrics Report:", i + 1));
+                        System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
                         System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
                         System.out.println(String.format("  -> Left-to-Right Flow Normalization (Removed Left Line): %d", metrics.leftToRightCount));
@@ -160,58 +161,92 @@ public class VectorRecolor {
         int totalLinesRemoved = 0;
     }
 
-    private static NormalizationMetrics applySizeMatchedNormalization(List<VisualBox> boxes) {
+    private static NormalizationMetrics applyChainLinkedNormalization(List<VisualBox> boxes) {
         NormalizationMetrics stats = new NormalizationMetrics();
         
-        float alignmentTolerance = 6.0f; 
-        float sizeMatchTolerance = 3.0f; // Delta for comparing matching heights/widths
+        float alignmentTolerance = 5.0f;  // Max alignment deviation limit
+        float sizeMatchTolerance = 2.0f;  // Max shape structural difference limit
+        float gapSearchLimit = 15.0f;     // Spatial jump window to locate an adjacent cell
 
-        for (VisualBox target : boxes) {
+        for (int i = 0; i < boxes.size(); i++) {
+            VisualBox target = boxes.get(i);
             if (!target.isEmpty) continue; 
 
-            boolean hasHeightMatchedRowNeighbor = false;
-            boolean hasWidthMatchedColNeighbor = false;
+            System.out.print(String.format(" Box #%d [W=%.1f, H=%.1f] -> ", i, target.bounds.width, target.bounds.height));
 
+            boolean immediateRowRepeat = false;
+            boolean immediateColRepeat = false;
+
+            // Step 1: Scan for an immediate matching neighbor along the horizontal row path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
 
-                // 1. Evaluate Row Alignment Flow + Check if it shares a similar structural height
-                boolean isSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
-                boolean isSimilarHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
-                if (isSameRow && isSimilarHeight) {
-                    hasHeightMatchedRowNeighbor = true;
-                }
-
-                // 2. Evaluate Column Alignment Flow + Check if it shares a similar structural width
-                boolean isSameColumn = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
-                boolean isSimilarWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
-                if (isSameColumn && isSimilarWidth) {
-                    hasWidthMatchedColNeighbor = true;
+                boolean onSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
+                boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
+                
+                if (onSameRow && matchHeight) {
+                    // Check if it is physically adjacent (touching or separated by a minimal grid gap)
+                    float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
+                    float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
+                    
+                    if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
+                        (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
+                        immediateRowRepeat = true;
+                        break; // Found contiguous grid line neighbor
+                    }
                 }
             }
 
-            // Step 4: Fallback decision flow based on size-matched metrics
-            if (hasHeightMatchedRowNeighbor && !hasWidthMatchedColNeighbor) {
-                // Pure horizontal table layout behavior -> Wipe Left Line
+            // Step 2: Scan for an immediate matching neighbor along the vertical column path
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+
+                boolean onSameCol = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
+                boolean matchWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
+
+                if (onSameCol && matchWidth) {
+                    // Check if it is physically adjacent vertically above or below
+                    float distanceAbove = target.bounds.y - (neighbor.bounds.y + neighbor.bounds.height);
+                    float distanceBelow = neighbor.bounds.y - (target.bounds.y + target.bounds.height);
+
+                    if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
+                        (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
+                        immediateColRepeat = true;
+                        break; // Found vertical column stack repetition
+                    }
+                }
+            }
+
+            // Step 3: Classify layout properties using strict immediate proximity repetitions
+            if (immediateRowRepeat && !immediateColRepeat) {
                 target.drawLeft = false;
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved += 1;
-            } else if (hasWidthMatchedColNeighbor && !hasHeightMatchedRowNeighbor) {
-                // Pure vertical column block layout behavior -> Wipe Top Line
+                System.out.println("RESOLVED: Continuous Row Flow (Removed Left Line)");
+            } else if (immediateColRepeat && !immediateRowRepeat) {
                 target.drawTop = false;
                 stats.topToBottomCount++;
                 stats.totalLinesRemoved += 1;
-            } else if (hasHeightMatchedRowNeighbor && hasWidthMatchedColNeighbor) {
-                // Cross-grid intersection cell layout -> Keep all 4 walls intact
-                stats.bidirectionalCount++;
+                System.out.println("RESOLVED: Continuous Column Stack (Removed Top Line)");
+            } else if (immediateRowRepeat && immediateColRepeat) {
+                // If it is a true cross-grid element but matches narrow spacing column profiles, execute left-to-right removal
+                if (target.bounds.width < 22.0f) {
+                    target.drawLeft = false;
+                    stats.leftToRightCount++;
+                    stats.totalLinesRemoved += 1;
+                    System.out.println("RESOLVED (Narrow Override): Grid Cross Gap (Removed Left Line)");
+                } else {
+                    stats.bidirectionalCount++;
+                    System.out.println("RESOLVED: Full Table Matrix Block (Kept Intact)");
+                }
             } else {
-                // No matches found anywhere around -> Wiped completely
                 target.drawLeft = false;
                 target.drawTop = false;
                 target.drawRight = false;
                 target.drawBottom = false;
                 stats.isolatedCount++;
                 stats.totalLinesRemoved += 4;
+                System.out.println("RESOLVED: Isolated Box (Wiped Completely)");
             }
         }
         return stats;
