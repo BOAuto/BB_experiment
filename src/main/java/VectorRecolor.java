@@ -6,6 +6,7 @@ import org.apache.pdfbox.cos.COSFloat;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.cos.COSNumber;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.common.PDStream;
@@ -42,7 +43,8 @@ public class VectorRecolor {
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
-                    mutatePageStream(page);
+                    // Pass the document object down along with the page
+                    mutatePageStream(document, page);
                 }
                 document.save(outputFile);
                 System.out.println(" -> Successfully mutated and saved: " + outputFile.getAbsolutePath());
@@ -52,7 +54,7 @@ public class VectorRecolor {
         }
     }
 
-    private static void mutatePageStream(PDPage page) throws IOException {
+    private static void mutatePageStream(PDDocument document, PDPage page) throws IOException {
         PDFStreamParser parser = new PDFStreamParser(page);
         List<Object> tokens = parser.parse();
         List<Object> newTokens = new ArrayList<>();
@@ -88,29 +90,25 @@ public class VectorRecolor {
                         float targetY = ((COSNumber) yToken).floatValue();
 
                         // TARGET RULE: Detect vertical grid lines (X matches, Y changes)
-                        // Adjust these conditions to pinpoint your exact target lines
                         boolean isVerticalLine = Math.abs(targetX - lastX) < 0.5f;
                         boolean isSubstantial = Math.abs(targetY - lastY) > 4.0f;
 
                         if (isVerticalLine && isSubstantial) {
-                            // Instead of letting it reach targetY, mutate the token in place!
-                            // Shorten the height down to a nominal 0.001 delta
+                            // Shorten the height down to a nominal 0.001 delta in-place
                             float shortenedY = lastY + (targetY > lastY ? 0.001f : -0.001f);
                             
-                            // Replace the arguments in the stream before the line operator executes
+                            // Mutate arguments safely in the array back-stack
                             newTokens.set(newTokens.size() - 2, new COSFloat(targetX));
                             newTokens.set(newTokens.size() - 1, new COSFloat(shortenedY));
                             
                             mutationCount++;
                             
-                            // Update our tracker state to reflect the shortened coordinates
                             lastX = targetX;
                             lastY = shortenedY;
                             newTokens.add(token);
                             continue;
                         }
 
-                        // Track normal movement if not intercepted
                         lastX = targetX;
                         lastY = targetY;
                     }
@@ -126,7 +124,6 @@ public class VectorRecolor {
                         
                         // If this rectangle matches a narrow structural layout gap border
                         if (w > 3.0f && w < 22.0f) {
-                            // Mutate height argument to a nominal fraction
                             newTokens.set(newTokens.size() - 1, new COSFloat(0.001f));
                             mutationCount++;
                         }
@@ -136,11 +133,11 @@ public class VectorRecolor {
             newTokens.add(token);
         }
 
-        // Flush and overwrite the updated token token-map sequence directly into the page stream
+        // Flush and overwrite using the corrected PDDocument reference
         if (mutationCount > 0) {
-            PDStream updatedStream = new PDStream(page.getCOSObject().getDoc());
+            PDStream updatedStream = new PDStream(document);
             try (OutputStream os = updatedStream.createOutputStream(COSName.FLATE_DECODE)) {
-                org.apache.pdfbox.pdfwriter.ContentStreamWriter writer = new org.apache.pdfbox.pdfwriter.ContentStreamWriter(os);
+                ContentStreamWriter writer = new ContentStreamWriter(os);
                 writer.writeTokens(newTokens);
             }
             page.setContents(updatedStream);
