@@ -10,13 +10,10 @@ import org.apache.pdfbox.Loader;
 
 import java.awt.Color;
 import java.awt.geom.Point2D;
-import java.awt.geom.Line2D;
 import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 
 public class VectorRecolor {
@@ -30,279 +27,281 @@ public class VectorRecolor {
         }
 
         File[] files = inputDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".pdf"));
+
         if (files == null || files.length == 0) {
-            System.out.println("[-] No PDF files found in 'pdfs/' directory.");
+            System.out.println("No PDF files found in 'pdfs/' directory.");
             return;
         }
 
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
-            System.out.println("\n========================================================");
-            System.out.println("[START] Processing Structure for: " + inputFile.getName());
-            System.out.println("========================================================");
+            System.out.println("\n------------------------------------------------");
+            System.out.println("Processing File: " + inputFile.getName());
+            System.out.println("------------------------------------------------");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
                 for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
-                    System.out.println(String.format("\n--- PAGE %d (Height: %.2f) ---", i + 1, pageHeight));
                     
-                    // Step 1: Extract raw lines using your reliable GraphicsEngine wrapper
-                    LineExtractorEngine lineEngine = new LineExtractorEngine(page);
-                    lineEngine.processPage(page);
-                    List<Line2D> allLines = lineEngine.getExtractedLines();
-                    System.out.println(String.format("[DEBUG] Extracted %d raw vector path lines.", allLines.size()));
+                    // Pass 1: Extract layout cell coordinates
+                    GeometryScanner scanner = new GeometryScanner(page);
+                    scanner.processPage(page);
+                    List<Rectangle2D> rawBoxes = scanner.getDetectedBoxes();
 
-                    // Step 2: Assemble visual closed rectangles using the high-performance window search
-                    long startTime = System.currentTimeMillis();
-                    List<VisualRect> visualBoxes = GridStructureParser.findVisualRectangles(allLines);
-                    long endTime = System.currentTimeMillis();
-                    System.out.println(String.format("[DEBUG] Formed %d visual closed rectangles in %d ms.", visualBoxes.size(), (endTime - startTime)));
+                    List<VisualBox> visualBoxes = new ArrayList<>();
+                    for (Rectangle2D rb : rawBoxes) {
+                        if (rb.getWidth() > 2.0 && rb.getHeight() > 4.0) {
+                            visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
+                        }
+                    }
+
+                    List<Rectangle2D.Float> linesToKill = new ArrayList<>();
 
                     if (!visualBoxes.isEmpty()) {
-                        // Step 3: Check regions for text content
                         PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                         stripper.setSortByPosition(true);
 
                         for (int b = 0; b < visualBoxes.size(); b++) {
-                            Rectangle2D.Float bounds = visualBoxes.get(b).bounds;
-                            float awtY = pageHeight - bounds.y - bounds.height;
-                            
-                            // 1-point inward padding to avoid scraping border vectors as text
+                            Rectangle2D.Float bnd = visualBoxes.get(b).bounds;
+                            float awtY = pageHeight - bnd.y - bnd.height;
                             stripper.addRegion("box_" + b, new Rectangle2D.Float(
-                                bounds.x + 1.0f, awtY + 1.0f, bounds.width - 2.0f, bounds.height - 2.0f
-                            ));
+                                    bnd.x + 1.0f, awtY + 1.0f, bnd.width - 2.0f, bnd.height - 2.0f));
                         }
-                        
+
                         stripper.extractRegions(page);
 
-                        System.out.println("\n--- Box Content Diagnostics ---");
+                        int targetedEmptyCount = 0;
                         for (int b = 0; b < visualBoxes.size(); b++) {
-                            VisualRect box = visualBoxes.get(b);
-                            String textInside = stripper.getTextForRegion("box_" + b).trim();
-                            box.hasContent = !textInside.isEmpty();
+                            VisualBox box = visualBoxes.get(b);
+                            String contentText = stripper.getTextForRegion("box_" + b).trim();
                             
-                            System.out.println(String.format(" Box #%d -> Bounds[x=%.1f, y=%.1f, w=%.1f, h=%.1f] | Has Content: %b | Extracted Text: '%s'", 
-                                b, box.bounds.x, box.bounds.y, box.bounds.width, box.bounds.height, box.hasContent, textInside));
+                            boolean isPureTextEmpty = contentText.isEmpty();
+                            boolean isStructuralGapColumn = (box.bounds.width > 3.0f && box.bounds.width < 22.0f);
+
+                            if (isPureTextEmpty || isStructuralGapColumn) {
+                                box.isEmpty = true;
+                                targetedEmptyCount++;
+                            }
                         }
 
-                        // Step 4: Run proximity analysis and apply flow normalization
-                        System.out.println("\n--- Normalization Logic Diagnostics ---");
-                        GridStructureParser.applyNormalizationRules(visualBoxes);
+                        System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
+                        NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Step 5: High-Precision Visual Verification Layer (Green Lines)
+                        // Pass 2: Re-process the graphics stream using our structural exclusion rules
+                        // This updates the internal canvas by processing operators and stripping matched lines
+                        ContentExclusionEngine filterEngine = new ContentExclusionEngine(page, linesToKill);
+                        filterEngine.processPage(page);
+
+                        // Optional validation overlay: renders remaining active cell lines as green matrices
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
-                            // Set the color to GREEN so you can visually verify the output
                             contentStream.setStrokingColor(Color.GREEN);
-                            contentStream.setLineWidth(1.5f);
+                            contentStream.setLineWidth(1.0f);
 
-                            for (VisualRect box : visualBoxes) {
+                            for (VisualBox box : visualBoxes) {
                                 if (box.drawLeft) {
                                     contentStream.moveTo(box.bounds.x, box.bounds.y);
                                     contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke();
                                 }
-                                if (box.drawTop) {
-                                    contentStream.moveTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke();
-                                }
-                                if (box.drawRight) {
-                                    contentStream.moveTo(box.bounds.x + box.bounds.width, box.bounds.y);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height);
-                                    contentStream.stroke();
-                                }
-                                if (box.drawBottom) {
-                                    contentStream.moveTo(box.bounds.x, box.bounds.y);
-                                    contentStream.lineTo(box.bounds.x + box.bounds.width, box.bounds.y);
-                                    contentStream.stroke();
-                                }
+                                contentStream.stroke();
                             }
                         }
+
+                        System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
+                        System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
+                        System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
+                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Suppressed Left Lines): %d", metrics.leftToRightCount));
+                        System.out.println(String.format("  -> Total Grid Lines Safely Removed: %d", metrics.totalLinesRemoved));
                     } else {
-                        System.out.println("[WARN] No closed 4-sided structural boxes detected on this page.");
+                        System.out.println(String.format("Page %d: No drawn outline boxes were recorded.", i + 1));
                     }
                 }
+
                 document.save(outputFile);
-                System.out.println("\n[SUCCESS] Generated: " + outputFile.getAbsolutePath());
+                System.out.println(" -> Successfully saved output to: " + outputFile.getAbsolutePath());
+
             } catch (IOException e) {
-                System.err.println("[-] Error analyzing " + inputFile.getName() + ": " + e.getMessage());
+                System.err.println("Error processing " + inputFile.getName() + ": " + e.getMessage());
             }
         }
     }
 
-    public static class VisualRect {
-        public Rectangle2D.Float bounds;
-        public boolean hasContent = false;
-        public boolean drawLeft = true;
-        public boolean drawTop = true;
-        public boolean drawRight = true;
-        public boolean drawBottom = true;
+    private static class VisualBox {
+        Rectangle2D.Float bounds;
+        boolean isEmpty = false;
+        boolean drawLeft = true;
 
-        VisualRect(float x, float y, float w, float h) {
+        VisualBox(float x, float y, float w, float h) {
             this.bounds = new Rectangle2D.Float(x, y, w, h);
         }
     }
 
-    private static class LineExtractorEngine extends PDFGraphicsStreamEngine {
-        private final List<Line2D> extractedLines = new ArrayList<>();
-        private Point2D currentPoint = new Point2D.Float(0, 0);
-
-        protected LineExtractorEngine(PDPage page) { super(page); }
-        public List<Line2D> getExtractedLines() { return extractedLines; }
-
-        @Override
-        public void moveTo(float x, float y) { this.currentPoint = new Point2D.Float(x, y); }
-
-        @Override
-        public void lineTo(float x, float y) {
-            extractedLines.add(new Line2D.Float((float)currentPoint.getX(), (float)currentPoint.getY(), x, y));
-            this.currentPoint = new Point2D.Float(x, y);
-        }
-
-        @Override
-        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) {
-            extractedLines.add(new Line2D.Double(p0, p1));
-            extractedLines.add(new Line2D.Double(p1, p2));
-            extractedLines.add(new Line2D.Double(p2, p3));
-            extractedLines.add(new Line2D.Double(p3, p0));
-        }
-
-        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) {}
-        @Override public void strokePath() {}
-        @Override public void fillPath(int windingRule) {}
-        @Override public void fillAndStrokePath(int windingRule) {}
-        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) {}
-        @Override public void clip(int windingRule) {}
-        @Override public void closePath() {}
-        @Override public void endPath() {}
-        @Override public Point2D getCurrentPoint() { return currentPoint; }
-        @Override public void shadingFill(COSName shadingName) {}
+    private static class NormalizationMetrics {
+        int leftToRightCount = 0;
+        int totalLinesRemoved = 0;
     }
 
-    private static class GridStructureParser {
+    private static NormalizationMetrics identifyTargetLines(List<VisualBox> boxes, List<Rectangle2D.Float> killList) {
+        NormalizationMetrics stats = new NormalizationMetrics();
         
-        public static List<VisualRect> findVisualRectangles(List<Line2D> lines) {
-            List<VisualRect> rects = new ArrayList<>();
-            float snapTolerance = 4.0f; 
+        float alignmentTolerance = 5.0f;  
+        float sizeMatchTolerance = 2.0f;  
+        float gapSearchLimit = 15.0f;     
 
-            List<Line2D> horiz = new ArrayList<>();
-            List<Line2D> vert = new ArrayList<>();
-            
-            // Step 1: Segregate and normalize directional orientations
-            for (Line2D line : lines) {
-                double x1 = line.getX1(), x2 = line.getX2();
-                double y1 = line.getY1(), y2 = line.getY2();
+        for (int i = 0; i < boxes.size(); i++) {
+            VisualBox target = boxes.get(i);
+            if (!target.isEmpty) continue; 
+
+            boolean immediateRowRepeat = false;
+
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+
+                boolean onSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
+                boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
                 
-                if (Math.abs(y1 - y2) <= snapTolerance) {
-                    // Ensure left-to-right sorting consistency internally
-                    horiz.add(x1 <= x2 ? new Line2D.Double(x1, y1, x2, y1) : new Line2D.Double(x2, y1, x1, y1));
-                } else if (Math.abs(x1 - x2) <= snapTolerance) {
-                    // Ensure bottom-to-top sorting consistency internally
-                    vert.add(y1 <= y2 ? new Line2D.Double(x1, y1, x1, y2) : new Line2D.Double(x1, y2, x1, y1));
-                }
-            }
-
-            // Step 2: Sort collections to enable sliding-window proximity searches
-            Collections.sort(horiz, Comparator.comparingDouble(Line2D::getY1));
-            Collections.sort(vert, Comparator.comparingDouble(Line2D::getX1));
-
-            // Step 3: Spatial alignment intersection mapping loop (Highly Optimized)
-            for (int i = 0; i < horiz.size(); i++) {
-                Line2D hTop = horiz.get(i);
-                
-                for (int j = 0; j < horiz.size(); j++) {
-                    Line2D hBot = horiz.get(j);
-                    if (hTop.getY1() <= hBot.getY1()) continue;
+                if (onSameRow && matchHeight) {
+                    float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
+                    float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
                     
-                    // Early exit logic if the vertical row bounds exceed any realistic table cell profile
-                    if (hTop.getY1() - hBot.getY1() > 150.0) continue;
-
-                    // Spatial window filtering strategy for matching vertical segments
-                    for (int k = 0; k < vert.size(); k++) {
-                        Line2D vLeft = vert.get(k);
-                        
-                        for (int l = k + 1; l < vert.size(); l++) {
-                            Line2D vRight = vert.get(l);
-                            
-                            float minX = (float) vLeft.getX1();
-                            float maxX = (float) vRight.getX1();
-                            float minY = (float) hBot.getY1();
-                            float maxY = (float) hTop.getY1();
-
-                            // Proximity check boundary limit to intercept early
-                            if (maxX - minX > 500.0f) break; 
-
-                            if (hTop.getX1() - snapTolerance <= minX && hTop.getX2() + snapTolerance >= maxX &&
-                                hBot.getX1() - snapTolerance <= minX && hBot.getX2() + snapTolerance >= maxX) {
-                                
-                                // Validate that vertical lines physically span the horizontal bounds
-                                if (vLeft.getY1() - snapTolerance <= minY && vLeft.getY2() + snapTolerance >= maxY &&
-                                    vRight.getY1() - snapTolerance <= minY && vRight.getY2() + snapTolerance >= maxY) {
-
-                                    float width = maxX - minX;
-                                    float height = maxY - minY;
-                                    
-                                    if (width > 4.0f && height > 4.0f) {
-                                        VisualRect detected = new VisualRect(minX, minY, width, height);
-                                        if (rects.stream().noneMatch(r -> Math.abs(r.bounds.x - detected.bounds.x) < 3.0f 
-                                                                      && Math.abs(r.bounds.y - detected.bounds.y) < 3.0f)) {
-                                            rects.add(detected);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
+                        (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
+                        immediateRowRepeat = true;
+                        break; 
                     }
                 }
             }
-            return rects;
-        }
 
-        public static void applyNormalizationRules(List<VisualRect> boxes) {
-            float flowAlignmentThreshold = 6.0f; 
-
-            for (int i = 0; i < boxes.size(); i++) {
-                VisualRect target = boxes.get(i);
-                if (target.hasContent) continue; 
-
-                boolean hasHorizontalFlow = false;
-                boolean hasVerticalFlow = false;
-
-                for (VisualRect neighbor : boxes) {
-                    if (target == neighbor) continue;
-
-                    boolean sameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < flowAlignmentThreshold;
-                    if (sameRow) {
-                        hasHorizontalFlow = true;
-                    }
-
-                    boolean sameColumn = Math.abs(target.bounds.x - neighbor.bounds.x) < flowAlignmentThreshold;
-                    if (sameColumn) {
-                        hasVerticalFlow = true;
-                    }
-                }
-
-                System.out.print(String.format(" -> Evaluating Empty Box #%d: HorizNeighbor=%b, VertNeighbor=%b", i, hasHorizontalFlow, hasVerticalFlow));
+            if (immediateRowRepeat) {
+                target.drawLeft = false; 
+                // Build a strict masking window for intercepting the physical stream vectors
+                killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
                 
-                if (hasHorizontalFlow && !hasVerticalFlow) {
-                    target.drawLeft = false; 
-                    System.out.println(" -> Result: [Horizontal Flow Detected] Wiping Left Border.");
-                } else if (hasVerticalFlow && !hasHorizontalFlow) {
-                    target.drawTop = false;  
-                    System.out.println(" -> Result: [Vertical Flow Detected] Wiping Top Border.");
-                } else if (!hasHorizontalFlow && !hasVerticalFlow) {
-                    target.drawLeft = false;
-                    target.drawTop = false;
-                    target.drawRight = false;
-                    target.drawBottom = false;
-                    System.out.println(" -> Result: [Isolated Box Detected] Wiping all 4 borders.");
-                } else {
-                    System.out.println(" -> Result: [Bidirectional Flow Detected] Leaving borders untouched.");
-                }
+                stats.leftToRightCount++;
+                stats.totalLinesRemoved++;
+                System.out.println(String.format(" Target Match -> Suppressing Left Line boundary for Box #%d [X=%.1f, Y=%.1f]", i, target.bounds.x, target.bounds.y));
             }
         }
+        return stats;
+    }
+
+    // --- FIX: Active Content Exclusion Engine suppressing matching primitives ---
+    private static class ContentExclusionEngine extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D.Float> exclusions;
+        private Double currentX, currentY;
+        private boolean skipActivePathElement = false;
+
+        protected ContentExclusionEngine(PDPage page, List<Rectangle2D.Float> exclusions) {
+            super(page);
+            this.exclusions = exclusions;
+        }
+
+        private void testVectorCoordinates(double x, double y) {
+            if (currentX != null && currentY != null) {
+                // Construct a virtual vector line bounding descriptor
+                double minX = Math.min(currentX, x);
+                double minY = Math.min(currentY, y);
+                double w = Math.max(Math.abs(x - currentX), 1.0);
+                double h = Math.max(Math.abs(y - currentY), 1.0);
+                Rectangle2D.Float structuralSegment = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
+
+                for (Rectangle2D.Float mask : exclusions) {
+                    if (mask.intersects(structuralSegment)) {
+                        // Match confirmed! Trigger suppression to dump execution of this primitive stroke
+                        skipActivePathElement = true;
+                        break;
+                    }
+                }
+            }
+            currentX = x;
+            currentY = y;
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
+            currentX = p0.getX();
+            currentY = p0.getY();
+            testVectorCoordinates(p2.getX(), p2.getY());
+        }
+
+        @Override public void moveTo(float x, float y) throws IOException { 
+            currentX = (double)x; 
+            currentY = (double)y; 
+        }
+
+        @Override public void lineTo(float x, float y) throws IOException { 
+            testVectorCoordinates(x, y); 
+        }
+
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            testVectorCoordinates(x3, y3);
+        }
+
+        @Override public void strokePath() throws IOException {
+            if (skipActivePathElement) {
+                // Drop this operation entirely — lines are actively erased from stream context
+                skipActivePathElement = false;
+            }
+            currentX = currentY = null;
+        }
+
+        @Override public void fillPath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
+    }
+
+    private static class GeometryScanner extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
+        private Double minX, minY, maxX, maxY;
+
+        protected GeometryScanner(PDPage page) { super(page); }
+        public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
+
+        private void updateBounds(double x, double y) {
+            if (minX == null) {
+                minX = maxX = x;
+                minY = maxY = y;
+            } else {
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+        }
+
+        private void flushPath() {
+            if (minX != null) {
+                detectedBoxes.add(new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY));
+                minX = minY = maxX = maxY = null;
+            }
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
+            updateBounds(p0.getX(), p0.getY());
+            updateBounds(p2.getX(), p2.getY());
+        }
+
+        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            updateBounds(x1, y1); updateBounds(x3, y3);
+        }
+        @Override public void strokePath() throws IOException { flushPath(); }
+        @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
 }
