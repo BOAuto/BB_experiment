@@ -7,6 +7,7 @@ import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSBase;
 import org.apache.pdfbox.cos.COSNumber;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.text.PDFTextStripperByArea;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
@@ -91,7 +92,7 @@ public class VectorRecolor {
                         System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Pass 2: Low-Level Operator Token Stream Mutator (Completely avoids invalid super class issues)
+                        // Pass 2: Low-Level Operator Token Stream Mutator
                         pruneStreamTokensAtCoordinates(page, linesToKill);
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
@@ -159,7 +160,7 @@ public class VectorRecolor {
             }
 
             if (immediateRowRepeat) {
-                // Precision vector exclusion bounding window matching only the target left vertical line frame
+                // Tight precision filter window matching only the target left vertical line frame
                 killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
                 
                 stats.leftToRightCount++;
@@ -176,8 +177,8 @@ public class VectorRecolor {
         List<Object> finalTokens = new ArrayList<>();
         
         List<COSBase> arguments = new ArrayList<>();
-        Double lastCursorX = null;
-        Double lastCursorY = null;
+        Float lastCursorX = null;
+        Float lastCursorY = null;
 
         Object token;
         while ((token = parser.parseNextToken()) != null) {
@@ -188,19 +189,19 @@ public class VectorRecolor {
                 // Intercept and manipulate drawing subpaths dynamically
                 if (opName.equals("m") && arguments.size() >= 2) { // moveTo
                     if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber) {
-                        lastCursorX = ((COSNumber) arguments.get(0)).doubleValue();
-                        lastCursorY = ((COSNumber) arguments.get(1)).doubleValue();
+                        lastCursorX = ((COSNumber) arguments.get(0)).floatValue();
+                        lastCursorY = ((COSNumber) arguments.get(1)).floatValue();
                     }
                 } else if (opName.equals("l") && arguments.size() >= 2) { // lineTo
                     if (arguments.get(0) instanceof COSNumber && arguments.get(1) instanceof COSNumber && lastCursorX != null && lastCursorY != null) {
-                        double targetX = ((COSNumber) arguments.get(0)).doubleValue();
-                        double targetY = ((COSNumber) arguments.get(1)).doubleValue();
+                        float targetX = ((COSNumber) arguments.get(0)).floatValue();
+                        float targetY = ((COSNumber) arguments.get(1)).floatValue();
                         
-                        double minX = Math.min(lastCursorX, targetX);
-                        double minY = Math.min(lastCursorY, targetY);
-                        double w = Math.max(Math.abs(targetX - lastCursorX), 0.5);
-                        double h = Math.max(Math.abs(targetY - lastCursorY), 0.5);
-                        Rectangle2D.Float currentSegment = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
+                        float minX = Math.min(lastCursorX, targetX);
+                        float minY = Math.min(lastCursorY, targetY);
+                        float w = Math.max(Math.abs(targetX - lastCursorX), 0.5f);
+                        float h = Math.max(Math.abs(targetY - lastCursorY), 0.5f);
+                        Rectangle2D.Float currentSegment = new Rectangle2D.Float(minX, minY, w, h);
 
                         boolean hitTargetLine = false;
                         for (Rectangle2D.Float mask : targetMasks) {
@@ -231,11 +232,13 @@ public class VectorRecolor {
             finalTokens.addAll(arguments);
         }
 
-        // Flush modified layout tokens back into the page stream context
-        try (OutputStream os = page.getContents().createOutputStream()) {
+        // Flush modified layout tokens back into a fresh stream to replace the old contents
+        PDStream updatedStream = new PDStream(page.getCOSObject().getCOSDocument());
+        try (OutputStream os = updatedStream.createOutputStream()) {
             org.apache.pdfbox.pdfwriter.ContentStreamWriter writer = new org.apache.pdfbox.pdfwriter.ContentStreamWriter(os);
             writer.writeTokens(finalTokens);
         }
+        page.setContents(updatedStream);
     }
 
     // --- Clean geometry scanner tracking coordinate boxes correctly ---
@@ -283,6 +286,7 @@ public class VectorRecolor {
         @Override public void clip(int windingRule) throws IOException {}
         @Override public void closePath() throws IOException {}
         @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override Point2D getInitialPosition() { return new Point2D.Float(0, 0); }
         @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
