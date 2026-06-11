@@ -28,6 +28,7 @@ jobs:
 
     - name: Compile Java Code
       run: |
+        mkdir -p bin
         javac -cp "lib/*" -d bin src/main/java/VectorRecolor.java
 
     - name: Ensure input directory exists
@@ -38,7 +39,7 @@ jobs:
         java -cp "bin:lib/*" main.java.VectorRecolor
 
     - name: Upload Processed PDFs
-      uses: actions/artifacts@v4
+      uses: actions/upload-artifact@v4
       with:
         name: processed-pdfs
         path: output_artifacts/
