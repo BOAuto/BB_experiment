@@ -88,31 +88,14 @@ public class VectorRecolor {
                         System.out.println(String.format("\n--- Line Interception Trace for Page %d ---", i + 1));
                         NormalizationMetrics metrics = identifyTargetLines(visualBoxes, linesToKill);
 
-                        // Pass 2: Re-process the graphics stream using our structural exclusion rules
-                        // This updates the internal canvas by processing operators and stripping matched lines
-                        ContentExclusionEngine filterEngine = new ContentExclusionEngine(page, linesToKill);
-                        filterEngine.processPage(page);
-
-                        // Optional validation overlay: renders remaining active cell lines as green matrices
-                        try (PDPageContentStream contentStream = new PDPageContentStream(
-                                document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
-                            
-                            contentStream.setStrokingColor(Color.GREEN);
-                            contentStream.setLineWidth(1.0f);
-
-                            for (VisualBox box : visualBoxes) {
-                                if (box.drawLeft) {
-                                    contentStream.moveTo(box.bounds.x, box.bounds.y);
-                                    contentStream.lineTo(box.bounds.x, box.bounds.y + box.bounds.height);
-                                }
-                                contentStream.stroke();
-                            }
-                        }
+                        // Pass 2: Re-process the stream and mutate targeted segments into non-drawing moves
+                        SubPathPruningEngine pruningEngine = new SubPathPruningEngine(page, linesToKill);
+                        pruningEngine.processPage(page);
 
                         System.out.println(String.format("\nPage %d Analysis Metrics Report:", i + 1));
                         System.out.println(String.format("  -> Exact Visual Boxes Tracked: %d", visualBoxes.size()));
                         System.out.println(String.format("  -> Normalized Target Boxes Identified: %d", targetedEmptyCount));
-                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Suppressed Left Lines): %d", metrics.leftToRightCount));
+                        System.out.println(String.format("  -> Left-to-Right Flow Normalization (Surgically Erased Lines): %d", metrics.leftToRightCount));
                         System.out.println(String.format("  -> Total Grid Lines Safely Removed: %d", metrics.totalLinesRemoved));
                     } else {
                         System.out.println(String.format("Page %d: No drawn outline boxes were recorded.", i + 1));
@@ -131,7 +114,6 @@ public class VectorRecolor {
     private static class VisualBox {
         Rectangle2D.Float bounds;
         boolean isEmpty = false;
-        boolean drawLeft = true;
 
         VisualBox(float x, float y, float w, float h) {
             this.bounds = new Rectangle2D.Float(x, y, w, h);
@@ -175,9 +157,8 @@ public class VectorRecolor {
             }
 
             if (immediateRowRepeat) {
-                target.drawLeft = false; 
-                // Build a strict masking window for intercepting the physical stream vectors
-                killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
+                // Tight precision filter window matching only the actual left vertical line boundary
+                killList.add(new Rectangle2D.Float(target.bounds.x - 0.5f, target.bounds.y - 0.5f, 1.0f, target.bounds.height + 1.0f));
                 
                 stats.leftToRightCount++;
                 stats.totalLinesRemoved++;
@@ -187,72 +168,78 @@ public class VectorRecolor {
         return stats;
     }
 
-    // --- FIX: Active Content Exclusion Engine suppressing matching primitives ---
-    private static class ContentExclusionEngine extends PDFGraphicsStreamEngine {
-        private final List<Rectangle2D.Float> exclusions;
+    // --- High-Precision Architecture: Atomic sub-path coordinator ---
+    private static class SubPathPruningEngine extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D.Float> targetMasks;
         private Double currentX, currentY;
-        private boolean skipActivePathElement = false;
 
-        protected ContentExclusionEngine(PDPage page, List<Rectangle2D.Float> exclusions) {
+        protected SubPathPruningEngine(PDPage page, List<Rectangle2D.Float> targetMasks) {
             super(page);
-            this.exclusions = exclusions;
+            this.targetMasks = targetMasks;
         }
 
-        private void testVectorCoordinates(double x, double y) {
-            if (currentX != null && currentY != null) {
-                // Construct a virtual vector line bounding descriptor
-                double minX = Math.min(currentX, x);
-                double minY = Math.min(currentY, y);
-                double w = Math.max(Math.abs(x - currentX), 1.0);
-                double h = Math.max(Math.abs(y - currentY), 1.0);
-                Rectangle2D.Float structuralSegment = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
+        private boolean shouldPruneSegment(double x0, double y0, double x1, double y1) {
+            double minX = Math.min(x0, x1);
+            double minY = Math.min(y0, y1);
+            double w = Math.max(Math.abs(x1 - x0), 0.5);
+            double h = Math.max(Math.abs(y1 - y0), 0.5);
+            Rectangle2D.Float segmentBounds = new Rectangle2D.Float((float)minX, (float)minY, (float)w, (float)h);
 
-                for (Rectangle2D.Float mask : exclusions) {
-                    if (mask.intersects(structuralSegment)) {
-                        // Match confirmed! Trigger suppression to dump execution of this primitive stroke
-                        skipActivePathElement = true;
-                        break;
-                    }
+            for (Rectangle2D.Float mask : targetMasks) {
+                if (mask.intersects(segmentBounds)) {
+                    return true; // Atomic vector intersection detected!
                 }
             }
-            currentX = x;
-            currentY = y;
+            return false;
         }
 
         @Override
         public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
-            currentX = p0.getX();
-            currentY = p0.getY();
-            testVectorCoordinates(p2.getX(), p2.getY());
+            // Unroll compound rectangle primitives to evaluate their individual lines atomically
+            moveTo((float)p0.getX(), (float)p0.getY());
+            lineTo((float)p1.getX(), (float)p1.getY());
+            lineTo((float)p2.getX(), (float)p2.getY());
+            lineTo((float)p3.getX(), (float)p3.getY());
+            closePath();
         }
 
-        @Override public void moveTo(float x, float y) throws IOException { 
+        @Override 
+        public void moveTo(float x, float y) throws IOException { 
             currentX = (double)x; 
             currentY = (double)y; 
+            super.moveTo(x, y);
         }
 
-        @Override public void lineTo(float x, float y) throws IOException { 
-            testVectorCoordinates(x, y); 
-        }
-
-        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
-            testVectorCoordinates(x3, y3);
-        }
-
-        @Override public void strokePath() throws IOException {
-            if (skipActivePathElement) {
-                // Drop this operation entirely — lines are actively erased from stream context
-                skipActivePathElement = false;
+        @Override 
+        public void lineTo(float x, float y) throws IOException { 
+            if (currentX != null && currentY != null && shouldPruneSegment(currentX, currentY, x, y)) {
+                // Precision Mutator: Convert line drawing execution into a localized navigation jump
+                super.moveTo(x, y); 
+            } else {
+                super.lineTo(x, y);
             }
-            currentX = currentY = null;
+            currentX = (double)x;
+            currentY = (double)y;
         }
 
-        @Override public void fillPath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
-        @Override public void fillAndStrokePath(int windingRule) throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override 
+        public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            if (currentX != null && currentY != null && shouldPruneSegment(currentX, currentY, x3, y3)) {
+                super.moveTo(x3, y3);
+            } else {
+                super.curveTo(x1, y1, x2, y2, x3, y3);
+            }
+            currentX = (double)x3;
+            currentY = (double)y3;
+        }
+
+        @Override public void strokePath() throws IOException { super.strokePath(); currentX = currentY = null; }
+        @Override public void fillPath(int windingRule) throws IOException { super.fillPath(windingRule); currentX = currentY = null; }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { super.fillAndStrokePath(windingRule); currentX = currentY = null; }
         @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
-        @Override public void clip(int windingRule) throws IOException {}
-        @Override public void closePath() throws IOException {}
-        @Override public void endPath() throws IOException { skipActivePathElement = false; currentX = currentY = null; }
+        @Override public void clip(int windingRule) throws IOException { super.clip(windingRule); }
+        @Override public void closePath() throws IOException { super.closePath(); }
+        @Override public void endPath() throws IOException { super.endPath(); currentX = currentY = null; }
         @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
