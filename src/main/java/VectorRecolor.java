@@ -20,7 +20,11 @@ import java.util.Map;
 
 public class VectorRecolor {
 
+    // Toggle this to enable/disable deep-dive diagnostic logs across the compiler execution
     private static final boolean DEBUG_MODE = true;
+    
+    // Toggle switch for isolating and processing empty structural boxes
+    private static final boolean REMOVE_DUMMY_LINES = true; 
 
     public static void main(String[] args) {
         File inputDir = new File("pdfs");
@@ -37,10 +41,11 @@ public class VectorRecolor {
         }
 
         for (File inputFile : files) {
-            File outputFile = new File(outputDir, "tuned_stitched_" + inputFile.getName());
+            File outputFile = new File(outputDir, "configured_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("TUNED COUPLING ENGINE ACTIVE: " + inputFile.getName());
+            System.out.println("PIPELINE ENGINE ACTIVE: " + inputFile.getName());
+            System.out.println("CONFIGURATION -> REMOVE_DUMMY_LINES = " + REMOVE_DUMMY_LINES + " | DEBUG_MODE = " + DEBUG_MODE);
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -50,15 +55,38 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n>>> PROCESSING PAGE %d OF %d <<<", i + 1, totalPages));
 
-                    // STAGE 1: Topology Analysis using identity references
-                    LayoutCompiler compiler = new LayoutCompiler(page);
-                    compiler.executeTopologyAnalysis();
-                    
-                    List<Rectangle2D> finalCleanBoxes = compiler.getFinalLayoutBoxes();
-                    List<Rectangle2D> finalCleanLines = compiler.getFinalLayoutLines();
+                    List<Rectangle2D> finalCleanBoxes = new ArrayList<>();
+                    List<Rectangle2D> finalCleanLines = new ArrayList<>();
 
-                    // STAGE 2: Precision Render Loop (Keeps unique structural counts minimal)
-                    System.out.println("[STAGE 2] Committing optimized layout paths to canvas...");
+                    if (REMOVE_DUMMY_LINES) {
+                        if (DEBUG_MODE) {
+                            System.out.println("[ENGINE TRACE] Initializing Multi-Pass Isolation Machine...");
+                        }
+                        LayoutCompiler compiler = new LayoutCompiler(page);
+                        compiler.executeTopologyAnalysis();
+                        
+                        finalCleanBoxes.addAll(compiler.getFinalLayoutBoxes());
+                        finalCleanLines.addAll(compiler.getFinalLayoutLines());
+                    } else {
+                        System.out.println("[ENGINE] Bypass active. Scavenging raw vectors directly from page stream...");
+                        DrawingBoxEngine scout = new DrawingBoxEngine(page);
+                        scout.processPage(page);
+                        List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
+
+                        for (Rectangle2D shape : rawScoutedVectors) {
+                            if (shape.getWidth() > 2.0 && shape.getHeight() > 2.0) {
+                                finalCleanBoxes.add(shape);
+                            } else {
+                                finalCleanLines.add(shape);
+                            }
+                        }
+                        if (DEBUG_MODE) {
+                            System.out.println(String.format("  -> [BYPASS TRACE] Collected %d total boxes and %d lines directly.", finalCleanBoxes.size(), finalCleanLines.size()));
+                        }
+                    }
+
+                    // STAGE 3: Structural Render Loop
+                    System.out.println("[STAGE 3] Committing optimized layout paths to canvas...");
                     try (PDPageContentStream outputStream = new PDPageContentStream(
                             document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                         
@@ -66,21 +94,29 @@ public class VectorRecolor {
                         outputStream.setLineWidth(1.0f);
                         int paintCount = 0;
 
-                        // 1. Draw Legitimate, Stretched Closed Table Cells
+                        // 1. Draw Closed Table Cells
                         for (Rectangle2D box : finalCleanBoxes) {
                             paintCount++;
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("  -> [CANVAS RENDER] Painting Box #%d: X=%.3f, Y=%.3f [W=%.3f, H=%.3f]", 
+                                        paintCount, box.getX(), box.getY(), box.getWidth(), box.getHeight()));
+                            }
                             outputStream.addRect((float)box.getX(), (float)box.getY(), (float)box.getWidth(), (float)box.getHeight());
                             outputStream.stroke();
                         }
 
-                        // 2. Draw Standalone Structural Lines Natively
+                        // 2. Draw Standalone Structural Lines
                         for (Rectangle2D line : finalCleanLines) {
                             paintCount++;
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("  -> [CANVAS RENDER] Painting Line #%d: X=%.3f, Y=%.3f [W=%.3f, H=%.3f]", 
+                                        paintCount, line.getX(), line.getY(), line.getWidth(), line.getHeight()));
+                            }
                             outputStream.addRect((float)line.getX(), (float)line.getY(), (float)line.getWidth(), (float)line.getHeight());
                             outputStream.stroke();
                         }
                         
-                        System.out.println(String.format("  -> Render complete. Total unique structural paths painted: %d", paintCount));
+                        System.out.println(String.format("  -> Render complete. Total structural paths painted: %d", paintCount));
                     }
                 }
 
@@ -95,13 +131,12 @@ public class VectorRecolor {
     }
 
     /**
-     * TOPOLOGY MATRIX MACHINE
+     * TOPOLOGY MATRIX MACHINE (ISOLATION CONTAINER WITH ULTRA VERBOSE LOGGING)
      */
     private static class LayoutCompiler {
         private final PDPage page;
         private final float pageHeight;
         
-        // Preserve your original structures exactly
         private final Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
         private final List<VisualCell> targetBoxesToAudit = new ArrayList<>();
         private final List<Rectangle2D> pureStandaloneLines = new ArrayList<>();
@@ -122,7 +157,11 @@ public class VectorRecolor {
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
 
-            // Clear Identity Separation upfront
+            if (DEBUG_MODE) {
+                System.out.println(String.format("  [PHASE 1: SCOUTING] PDF stream processed. Discovered %d total vector paths.", rawScoutedVectors.size()));
+            }
+
+            // Object Isolation Pass
             for (Rectangle2D shape : rawScoutedVectors) {
                 exclusionRegistry.put(shape, false); 
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 2.0) {
@@ -132,12 +171,23 @@ public class VectorRecolor {
                 }
             }
 
+            if (DEBUG_MODE) {
+                System.out.println(String.format("    -> Separated into %d Closed Box Containers and %d Standalone Lines.", 
+                        targetBoxesToAudit.size(), pureStandaloneLines.size()));
+            }
+
             if (targetBoxesToAudit.isEmpty()) {
+                if (DEBUG_MODE) {
+                    System.out.println("    -> No structural box containers to process. Fast-tracking line paths.");
+                }
                 finalLayoutLines.addAll(pureStandaloneLines);
                 return;
             }
 
             // Run Text Audit over current page frame context
+            if (DEBUG_MODE) {
+                System.out.println("  [PHASE 2: TEXT STRIPPER AUDIT] Registering boundary regions for content indexing...");
+            }
             PDFTextStripperByArea stripper = new PDFTextStripperByArea();
             stripper.setSortByPosition(true);
 
@@ -159,19 +209,32 @@ public class VectorRecolor {
                 if (textIsEmpty || isStructuralGapColumn) {
                     cell.isEmptyArea = true;
                 }
+                
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("    -> Box Context #%d at [X=%.3f, Y=%.3f]: Content=\"%s\" | IsEmptyArea=%b | IsGapColumn=%b", 
+                            b + 1, cell.bounds.getX(), cell.bounds.getY(), extractedText, textIsEmpty, isStructuralGapColumn));
+                }
             }
 
             // Static Neighborhood Flow Identification Pass
+            if (DEBUG_MODE) {
+                System.out.println("  [PHASE 3: NEIGHBORHOOD FLOW SCAN] Analyzing spatial layout patterns...");
+            }
             float alignmentTolerance = 1.0f;  
             float sizeMatchTolerance = 1.0f;  
             float gapSearchLimit = 0.5f; 
 
-            for (VisualCell current : targetBoxesToAudit) {
+            for (int i = 0; i < targetBoxesToAudit.size(); i++) {
+                VisualCell current = targetBoxesToAudit.get(i);
                 if (!current.isEmptyArea) continue;
 
                 boolean immediateRowRepeat = false;
                 boolean immediateColRepeat = false;
                 VisualCell targetPartner = null;
+
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("    -> Scanning surroundings for Empty Candidate #%d at [X=%.3f, Y=%.3f]", (i + 1), current.bounds.getX(), current.bounds.getY()));
+                }
 
                 // Scan Horizontal Flow Neighborhood
                 for (VisualCell neighbor : targetBoxesToAudit) {
@@ -192,6 +255,10 @@ public class VectorRecolor {
                                 } else if (targetPartner == null) {
                                     targetPartner = neighbor;
                                 }
+                            }
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("        * Horizontal Match found with neighbor [X=%.3f, Y=%.3f]. Adjacency Distance: Left=%.3f, Right=%.3f", 
+                                        neighbor.bounds.getX(), neighbor.bounds.getY(), distanceLeft, distanceRight));
                             }
                         }
                     }
@@ -217,11 +284,14 @@ public class VectorRecolor {
                                     targetPartner = neighbor;
                                 }
                             }
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("        * Vertical Match found with neighbor [X=%.3f, Y=%.3f]. Adjacency Distance: Above=%.3f, Below=%.3f", 
+                                        neighbor.bounds.getX(), neighbor.bounds.getY(), distanceAbove, distanceBelow));
+                            }
                         }
                     }
                 }
 
-                // Map flow constraints accurately using asymmetric mapping
                 if (immediateRowRepeat && !immediateColRepeat) {
                     current.flow = TableFlow.LEFT_TO_RIGHT;
                     current.adjacentDataCell = targetPartner;
@@ -231,10 +301,18 @@ public class VectorRecolor {
                 } else if (immediateRowRepeat && immediateColRepeat) {
                     current.flow = TableFlow.BIDIRECTIONAL;
                 }
+                
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("        * Final Flow Determined: %s | Selected Data Partner: %s", 
+                            current.flow, (current.adjacentDataCell != null ? "X=" + current.adjacentDataCell.bounds.getX() : "NONE")));
+                }
             }
 
             // Target-Specific Stitch Processing Pass
-            int occuranceCounter = 0;
+            if (DEBUG_MODE) {
+                System.out.println("  [PHASE 4: MUTATION & RESOLUTION LAYER] Constructing clean canvas lists...");
+            }
+            int occurrenceCounter = 0;
             for (VisualCell cell : targetBoxesToAudit) {
                 if (!cell.isEmptyArea) {
                     if (!finalLayoutBoxes.contains(cell.bounds)) {
@@ -243,61 +321,79 @@ public class VectorRecolor {
                     continue;
                 }
 
-                occuranceCounter++;
+                occurrenceCounter++;
                 if (DEBUG_MODE) {
-                    System.out.println(String.format("  [TARGETED DETECTION SUCCESS] Found box instance %d at -> X=%.3f, Y=%.3f | Flow Type: %s", 
-                            occuranceCounter, cell.bounds.getX(), cell.bounds.getY(), cell.flow));
+                    System.out.println(String.format("    -> [STITCH ENGINE] Processing Target Entry #%d at [X=%.3f, Y=%.3f] | Flow Rule: %s", 
+                            occurrenceCounter, cell.bounds.getX(), cell.bounds.getY(), cell.flow));
                 }
 
-                // Process the structural box using our non-destructive expansion mechanism
                 switch (cell.flow) {
                     case LEFT_TO_RIGHT:
                         if (cell.adjacentDataCell != null) {
                             VisualCell dataCell = cell.adjacentDataCell;
-                            if (DEBUG_MODE) {
-                                System.out.println(String.format("    -> [STITCH MACHINE] Extending valid cell X=%.3f width by %.3f", 
-                                        dataCell.bounds.getX(), cell.bounds.getWidth()));
-                            }
+                            double oldX = dataCell.bounds.getX();
+                            double oldW = dataCell.bounds.getWidth();
+                            
                             double newX = Math.min(dataCell.bounds.getX(), cell.bounds.getX());
                             double newWidth = dataCell.bounds.getWidth() + cell.bounds.getWidth();
                             dataCell.bounds.setRect(newX, dataCell.bounds.getY(), newWidth, dataCell.bounds.getHeight());
                             
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("        [MUTATION MULTI-PASS] Horizontal stretch completed. Valid box shifted: X: %.3f -> %.3f, Width: %.3f -> %.3f", 
+                                        oldX, newX, oldW, newWidth));
+                            }
                             if (!finalLayoutBoxes.contains(dataCell.bounds)) {
                                 finalLayoutBoxes.add(dataCell.bounds);
                             }
+                        } else if (DEBUG_MODE) {
+                            System.out.println("        [MUTATION SKIP] Left-To-Right detected, but adjacent data cell was null.");
                         }
                         break;
 
                     case TOP_TO_BOTTOM:
                         if (cell.adjacentDataCell != null) {
                             VisualCell dataCell = cell.adjacentDataCell;
-                            if (DEBUG_MODE) {
-                                System.out.println(String.format("    -> [STITCH MACHINE] Extending valid cell Y=%.3f height by %.3f", 
-                                        dataCell.bounds.getY(), cell.bounds.getHeight()));
-                            }
+                            double oldY = dataCell.bounds.getY();
+                            double oldH = dataCell.bounds.getHeight();
+                            
                             double newY = Math.min(dataCell.bounds.getY(), cell.bounds.getY());
                             double newHeight = dataCell.bounds.getHeight() + cell.bounds.getHeight();
                             dataCell.bounds.setRect(dataCell.bounds.getX(), newY, dataCell.bounds.getWidth(), newHeight);
 
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("        [MUTATION MULTI-PASS] Vertical stretch completed. Valid box shifted: Y: %.3f -> %.3f, Height: %.3f -> %.3f", 
+                                        oldY, newY, oldH, newHeight));
+                            }
                             if (!finalLayoutBoxes.contains(dataCell.bounds)) {
                                 finalLayoutBoxes.add(dataCell.bounds);
                             }
+                        } else if (DEBUG_MODE) {
+                            System.out.println("        [MUTATION SKIP] Top-To-Bottom detected, but adjacent data cell was null.");
                         }
                         break;
 
                     case BIDIRECTIONAL:
+                        if (DEBUG_MODE) {
+                            System.out.println("        [MUTATION PRESERVE] Bidirectional overlap discovered. Retaining native dimensions.");
+                        }
                         if (!finalLayoutBoxes.contains(cell.bounds)) {
                             finalLayoutBoxes.add(cell.bounds);
                         }
                         break;
 
                     case NOT_A_TABLE:
-                        // Drops empty isolated containers cleanly
+                        if (DEBUG_MODE) {
+                            System.out.println("        [MUTATION DROPPED] Empty container cell has no valid table structure neighbors. Safely discarded.");
+                        }
                         break;
                 }
             }
 
             finalLayoutLines.addAll(pureStandaloneLines);
+            if (DEBUG_MODE) {
+                System.out.println(String.format("  [ANALYSIS COMPLETE] Final execution output queues loaded with %d optimized boxes and %d lines.", 
+                        finalLayoutBoxes.size(), finalLayoutLines.size()));
+            }
         }
     }
 
