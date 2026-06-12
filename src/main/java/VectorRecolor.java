@@ -18,6 +18,8 @@ import java.util.List;
 
 public class VectorRecolor {
 
+    // Global toggle controlling detailed runtime trace output
+    private static final boolean DEBUG_MODE = true;
     private static final boolean SAVE_DRAWINGS_ONLY = true;
 
     public static void main(String[] args) {
@@ -26,30 +28,44 @@ public class VectorRecolor {
 
         if (!outputDir.exists()) {
             outputDir.mkdirs();
+            if (DEBUG_MODE) System.out.println("[INIT] Created output directory: " + outputDir.getPath());
         }
 
         File[] files = inputDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".pdf"));
 
         if (files == null || files.length == 0) {
-            System.out.println("No PDF files found in 'pdfs/' directory.");
+            System.out.println("[ERROR] No PDF files found in 'pdfs/' directory.");
             return;
         }
 
         for (File inputFile : files) {
             File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
-            System.out.println("Processing: " + inputFile.getName() + "...");
+            
+            System.out.println("\n==========================================================================");
+            System.out.println("PROCESSING FILE: " + inputFile.getName());
+            System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
-                for (int i = 0; i < document.getNumberOfPages(); i++) {
+                int totalPages = document.getNumberOfPages();
+                if (DEBUG_MODE) System.out.println(String.format("[PHASE 1] Document opened. In-memory page count: %d", totalPages));
+
+                for (int i = 0; i < totalPages; i++) {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
+                    System.out.println(String.format("\n--- Processing Page %d of %d ---", i + 1, totalPages));
+
                     // ==========================================
                     // PHASE 3: SCRIPT 1 VECTOR DETECTION
                     // ==========================================
+                    if (DEBUG_MODE) System.out.println("[PHASE 3] Initializing Script 1 DrawingBoxEngine...");
                     DrawingBoxEngine engine = new DrawingBoxEngine(page);
                     engine.processPage(page);
                     List<Rectangle2D> vectorBoxes = engine.getDetectedBoxes();
+                    
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("  -> Step Outcome: Found %d raw drawing vectors on page context.", vectorBoxes.size()));
+                    }
 
                     // ==========================================
                     // HELPER PHASE: SCRIPT 2 ISOLATED ANALYSIS
@@ -57,14 +73,22 @@ public class VectorRecolor {
                     List<Rectangle2D.Float> linesToKill = new ArrayList<>();
                     
                     if (!vectorBoxes.isEmpty()) {
+                        if (DEBUG_MODE) System.out.println("[HELPER] Script 2 Analysis activated in isolation.");
                         List<VisualBox> visualBoxes = new ArrayList<>();
+                        
+                        // Step A: Convert vectors to isolation tracking boxes
                         for (Rectangle2D rb : vectorBoxes) {
                             if (rb.getWidth() > 2.0 && rb.getHeight() > 4.0) {
                                 visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
                             }
                         }
+                        
+                        if (DEBUG_MODE) {
+                            System.out.println(String.format("  -> Step 1: Filtered out minor visual anomalies. Tracking %d boxes.", visualBoxes.size()));
+                        }
 
                         if (!visualBoxes.isEmpty()) {
+                            if (DEBUG_MODE) System.out.println("  -> Step 2: Extracting spatial text content mappings via Area Stripper...");
                             PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                             stripper.setSortByPosition(true);
 
@@ -77,6 +101,7 @@ public class VectorRecolor {
 
                             stripper.extractRegions(page);
 
+                            int emptyCount = 0;
                             for (int b = 0; b < visualBoxes.size(); b++) {
                                 VisualBox box = visualBoxes.get(b);
                                 String contentText = stripper.getTextForRegion("box_" + b).trim();
@@ -86,10 +111,16 @@ public class VectorRecolor {
 
                                 if (isPureTextEmpty || isStructuralGapColumn) {
                                     box.isEmpty = true;
+                                    emptyCount++;
                                 }
                             }
+                            
+                            if (DEBUG_MODE) {
+                                System.out.println(String.format("  -> Step 3: Text evaluation complete. Identified %d target empty blocks.", emptyCount));
+                                System.out.println("  -> Step 4: Scanning chain structures to map distinct deletion lines...");
+                            }
 
-                            // Identify the targets and fill our tracking list
+                            // Run structural mapping to collect targets directly as lines
                             identifyTargetLines(visualBoxes, linesToKill);
                         }
                     }
@@ -98,6 +129,7 @@ public class VectorRecolor {
                     // PHASE 4: SCRIPT 1 GREEN BOX ONDEMAND DRAWING
                     // ==========================================
                     if (!vectorBoxes.isEmpty()) {
+                        if (DEBUG_MODE) System.out.println("[PHASE 4] Executing Script 1 Drawing Overlays (Untouched Framework)...");
                         try (PDPageContentStream contentStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
@@ -110,14 +142,19 @@ public class VectorRecolor {
                                 contentStream.stroke();
                             }
                         }
+                        if (DEBUG_MODE) System.out.println("  -> Step Outcome: All original shapes overlayed with green boundaries.");
                     }
 
                     // ==========================================
                     // INSERTED STEP: EXECUTE LINE SUPPRESSION
                     // ==========================================
                     if (!linesToKill.isEmpty()) {
+                        System.out.println(String.format("[REMOVAL STEP] Feeding %d targeted line segments into Exclusion Engine...", linesToKill.size()));
                         ContentExclusionEngine filterEngine = new ContentExclusionEngine(page, linesToKill);
                         filterEngine.processPage(page);
+                        System.out.println("  -> Step Outcome: Stream interception completed successfully.");
+                    } else {
+                        if (DEBUG_MODE) System.out.println("[REMOVAL STEP] No matching lines were marked for suppression on this page.");
                     }
                 }
 
@@ -125,17 +162,17 @@ public class VectorRecolor {
                 // PHASE 5: FILE SERIALIZATION
                 // ==========================================
                 if (SAVE_DRAWINGS_ONLY) {
+                    System.out.println("\n[PHASE 5] Committing modifications and writing file data to disk...");
                     document.save(outputFile);
-                    System.out.println(" -> Saved to: " + outputFile.getAbsolutePath());
+                    System.out.println("SUCCESS: File output generated at: " + outputFile.getAbsolutePath());
                 }
 
             } catch (IOException e) {
-                System.err.println("Error processing " + inputFile.getName() + ": " + e.getMessage());
+                System.err.println("[EXC-FATAL] Error occurred during processing pipeline: " + e.getMessage());
             }
         }
     }
 
-    // --- SCRIPT 2 HELPER DATA STRUCTURES & LOGIC ---
     private static class VisualBox {
         Rectangle2D.Float bounds;
         boolean isEmpty = false;
@@ -145,27 +182,32 @@ public class VectorRecolor {
         }
     }
 
+    // Isolated structural analyst identifying directional targets and logging findings to terminal
     private static void identifyTargetLines(List<VisualBox> boxes, List<Rectangle2D.Float> killList) {
         float alignmentTolerance = 5.0f;  
         float sizeMatchTolerance = 2.0f;  
         float gapSearchLimit = 15.0f;     
+
+        int leftLinesFlagged = 0;
+        int topLinesFlagged = 0;
+        int completeWipesFlagged = 0;
 
         for (int i = 0; i < boxes.size(); i++) {
             VisualBox target = boxes.get(i);
             if (!target.isEmpty) continue; 
 
             boolean immediateRowRepeat = false;
+            boolean immediateColRepeat = false;
 
+            // Horizontal evaluation path
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
-
                 boolean onSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
                 boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
                 
                 if (onSameRow && matchHeight) {
                     float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
                     float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
-                    
                     if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
                         (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
                         immediateRowRepeat = true;
@@ -174,13 +216,68 @@ public class VectorRecolor {
                 }
             }
 
-            if (immediateRowRepeat) {
-                killList.add(new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f));
+            // Vertical evaluation path
+            for (VisualBox neighbor : boxes) {
+                if (target == neighbor) continue;
+                boolean onSameCol = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
+                boolean matchWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
+
+                if (onSameCol && matchWidth) {
+                    float distanceAbove = target.bounds.y - (neighbor.bounds.y + neighbor.bounds.height);
+                    float distanceBelow = neighbor.bounds.y - (target.bounds.y + target.bounds.height);
+                    if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
+                        (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
+                        immediateColRepeat = true;
+                        break; 
+                    }
+                }
             }
+
+            // Map structural patterns to distinct coordinates for deletion handing
+            if (immediateRowRepeat && !immediateColRepeat) {
+                Rectangle2D.Float leftLineMask = new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f);
+                killList.add(leftLineMask);
+                leftLinesFlagged++;
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("    -> [TARGET MATCH] Box #%d Row Flow. Flagging Left Vertical Line: [X=%.2f, Y=%.2f, H=%.2f]", 
+                            i, target.bounds.x, target.bounds.y, target.bounds.height));
+                }
+            } else if (immediateColRepeat && !immediateRowRepeat) {
+                Rectangle2D.Float topLineMask = new Rectangle2D.Float(target.bounds.x - 1.0f, (target.bounds.y + target.bounds.height) - 1.0f, target.bounds.width + 2.0f, 2.0f);
+                killList.add(topLineMask);
+                topLinesFlagged++;
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("    -> [TARGET MATCH] Box #%d Col Flow. Flagging Top Horizontal Line: [X=%.2f, Y=%.2f, W=%.2f]", 
+                            i, target.bounds.x, target.bounds.y + target.bounds.height, target.bounds.width));
+                }
+            } else if (immediateRowRepeat && immediateColRepeat) {
+                if (target.bounds.width < 22.0f) {
+                    Rectangle2D.Float narrowLeftMask = new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, 2.0f, target.bounds.height + 2.0f);
+                    killList.add(narrowLeftMask);
+                    leftLinesFlagged++;
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("    -> [TARGET MATCH] Box #%d Narrow Cross. Flagging Left Vertical Line: [X=%.2f, Y=%.2f]", 
+                                i, target.bounds.x, target.bounds.y));
+                    }
+                }
+            } else {
+                Rectangle2D.Float completeBoxMask = new Rectangle2D.Float(target.bounds.x - 1.0f, target.bounds.y - 1.0f, target.bounds.width + 2.0f, target.bounds.height + 2.0f);
+                killList.add(completeBoxMask);
+                completeWipesFlagged++;
+                if (DEBUG_MODE) {
+                    System.out.println(String.format("    -> [TARGET MATCH] Box #%d Isolated Frame. Flagging Complete Mask: [X=%.2f, Y=%.2f, W=%.2f, H=%.2f]", 
+                            i, target.bounds.x, target.bounds.y, target.bounds.width, target.bounds.height));
+                }
+            }
+        }
+
+        if (DEBUG_MODE) {
+            System.out.println(String.format("  -> Helper Summary: Handing over %d Left-Lines, %d Top-Lines, and %d Whole Frames.", 
+                    leftLinesFlagged, topLinesFlagged, completeWipesFlagged));
         }
     }
 
-    // --- SCRIPT 2: LINE EXCLUSION ENGINE ---
+    // Non-destructive Content Suppression Engine processing operators sequentially
     private static class ContentExclusionEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D.Float> exclusions;
         private Double currentX, currentY;
@@ -223,7 +320,7 @@ public class VectorRecolor {
 
         @Override public void strokePath() throws IOException {
             if (skipActivePathElement) {
-                skipActivePathElement = false;
+                skipActivePathElement = false; // Supress execution of primitive segment
             }
             currentX = currentY = null;
         }
@@ -238,7 +335,6 @@ public class VectorRecolor {
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
 
-    // --- SCRIPT 1: DRAWING BOX ENGINE ---
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
