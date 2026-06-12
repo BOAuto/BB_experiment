@@ -7,18 +7,12 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.text.PDFTextStripperByArea;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.pdfparser.PDFStreamParser;
-import org.apache.pdfbox.contentstream.operator.Operator;
-import org.apache.pdfbox.cos.COSBase;
-import org.apache.pdfbox.cos.COSNumber;
-import org.apache.pdfbox.pdmodel.common.PDStream;
 
 import java.awt.Color;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -54,52 +48,44 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
 
-                    // ==========================================================================
-                    // PHASE 1: TOTALLY ISOLATED SCOUT & MATRIX AUDIT (SCRIPT 2 INTERNAL RUN)
-                    // This pass runs Script 1 completely in memory to isolate the 20 artifact lines.
-                    // Absolutely no graphic changes or content streams are opened here.
-                    // ==========================================================================
-                    if (DEBUG_MODE) System.out.println("[PIPELINE] Initializing Script 2 Isolation Analysis Engine...");
+                    // ==========================================================
+                    // PASS 1: TOTALLY ISOLATED MEMORY CALCULATIONS
+                    // ==========================================================
+                    if (DEBUG_MODE) System.out.println("[PIPELINE] Running Script 2 Filtration in Complete Isolation...");
                     Script2Analyst analyst = new Script2Analyst(page);
                     
-                    // Generate the removal blacklist (the 20 artifact lines)
-                    List<Rectangle2D> blacklist = analyst.generateBlacklist();
+                    // This internal method runs Script 1 (Scout) strictly in memory.
+                    // It finds 1,583 vectors, runs the audit matrix, removes the 20 lines,
+                    // and returns the clean list of 1,563 approved vectors.
+                    List<Rectangle2D> approvedKeepList = analyst.generateApprovedSnapshot();
 
-                    // ==========================================================================
-                    // PHASE 2: SURGICAL STREAM PURGE (THE DELETION)
-                    // Intercepts the page's raw graphic instructions and drops the blacklisted paths.
-                    // ==========================================================================
-                    if (!blacklist.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[PIPELINE] Executing Low-Level Stream Purge on targeted paths...");
-                        surgicallyRemoveStreams(page, blacklist);
-                    }
-
-                    // ==========================================================================
-                    // PHASE 3: THE SINGLE GRAPHIC SNAPSHOT (THE VALDIATION LAYER)
-                    // Opens a single append stream to draw only the approved 1,563 lines in green.
-                    // ==========================================================================
-                    List<Rectangle2D> approvedKeepList = analyst.getLastApprovedKeepList();
+                    // ==========================================================
+                    // PASS 2: THE ONLY PRODUCTION DRAW EXECUTION
+                    // ==========================================================
                     if (!approvedKeepList.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[PIPELINE] Drawing final unified verification snapshot...");
+                        if (DEBUG_MODE) System.out.println("[PIPELINE] Drawing Approved Memory Snapshot onto Page Layer...");
+                        
+                        // We open a single content stream to commit our visual state change
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
 
+                            // Paint ONLY the 1,563 approved paths
                             for (Rectangle2D drawingTarget : approvedKeepList) {
                                 outputStream.addRect((float) drawingTarget.getX(), (float) drawingTarget.getY(), 
                                                      (float) drawingTarget.getWidth(), (float) drawingTarget.getHeight());
                                 outputStream.stroke();
                             }
                         }
-                        if (DEBUG_MODE) System.out.println("  -> Single Graphic Snapshot committed to page state successfully.");
+                        if (DEBUG_MODE) System.out.println("  -> Safe Single-Snapshot Pass successful for current page.");
                     }
                 }
 
-                System.out.println("\n[FINALIZE] Writing modified data blocks to output target...");
+                System.out.println("\n[FINALIZE] Committing memory allocations to disk...");
                 document.save(outputFile);
-                System.out.println("SUCCESS: Processed file safely committed at: " + outputFile.getAbsolutePath());
+                System.out.println("SUCCESS: Processed file committed and saved at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
                 System.err.println("[PIPELINE FATAL] IO Operation failed: " + e.getMessage());
@@ -108,135 +94,32 @@ public class VectorRecolor {
     }
 
     /**
-     * SURGICAL STREAM REDACTION ENGINE
-     * Parses the underlying content stream token by token, tracks geometry changes,
-     * and deletes targeted vector sequences directly from the native page syntax.
-     */
-    private static void surgicallyRemoveStreams(PDPage page, List<Rectangle2D> blacklist) throws IOException {
-        PDFStreamParser parser = new PDFStreamParser(page);
-        List<Object> newTokens = new ArrayList<>();
-        List<Object> currentPathTokens = new ArrayList<>();
-        
-        Double minX = null, minY = null, maxX = null, maxY = null;
-        float alignmentTolerance = 2.0f; // Precision tolerance for raw token stream matching
-
-        Object token = parser.parseNextToken();
-        while (token != null) {
-            currentPathTokens.add(token);
-
-            if (token instanceof Operator) {
-                Operator op = (Operator) token;
-                String opName = op.getName();
-
-                // Track inline pen translations to capture path bounds dynamically
-                if (opName.equals("m") || opName.equals("l")) { 
-                    int size = currentPathTokens.size();
-                    if (size >= 3 && currentPathTokens.get(size - 2) instanceof COSNumber && currentPathTokens.get(size - 3) instanceof COSNumber) {
-                        double x = ((COSNumber) currentPathTokens.get(size - 3)).doubleValue();
-                        double y = ((COSNumber) currentPathTokens.get(size - 2)).doubleValue();
-                        if (minX == null) { minX = maxX = x; minY = maxY = y; } 
-                        else { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-                    }
-                } 
-                else if (opName.equals("re")) { 
-                    int size = currentPathTokens.size();
-                    if (size >= 5 && currentPathTokens.get(size - 2) instanceof COSNumber && currentPathTokens.get(size - 5) instanceof COSNumber) {
-                        double x = ((COSNumber) currentPathTokens.get(size - 5)).doubleValue();
-                        double y = ((COSNumber) currentPathTokens.get(size - 4)).doubleValue();
-                        double w = ((COSNumber) currentPathTokens.get(size - 3)).doubleValue();
-                        double h = ((COSNumber) currentPathTokens.get(size - 2)).doubleValue();
-                        if (minX == null) { minX = x; minY = y; maxX = x + w; maxY = y + h; } 
-                        else { minX = Math.min(minX, x); maxX = Math.max(maxX, x + w); minY = Math.min(minY, y); maxY = Math.max(maxY, y + h); }
-                    }
-                }
-                // When path drawing terminates, check against the 20 blacklisted coordinate bounding shapes
-                else if (opName.equals("S") || opName.equals("f") || opName.equals("F") || opName.equals("b") || opName.equals("B")) {
-                    boolean matchesBlacklist = false;
-                    if (minX != null) {
-                        double width = maxX - minX;
-                        double height = maxY - minY;
-
-                        for (Rectangle2D blackItem : blacklist) {
-                            if (Math.abs(minX - blackItem.getX()) < alignmentTolerance &&
-                                Math.abs(minY - blackItem.getY()) < alignmentTolerance &&
-                                Math.abs(width - blackItem.getWidth()) < alignmentTolerance &&
-                                Math.abs(height - blackItem.getHeight()) < alignmentTolerance) {
-                                matchesBlacklist = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (matchesBlacklist) {
-                        // SURGICAL OMISSION: Clear the accumulated path tokens completely without writing them back
-                        if (DEBUG_MODE) {
-                            System.out.println(String.format("    -> [STREAM NATIVE PURGE] Successfully stripped structural line sequence from content stream at X=%.1f, Y=%.1f", minX, minY));
-                        }
-                    } else {
-                        newTokens.addAll(currentPathTokens);
-                    }
-                    
-                    currentPathTokens.clear();
-                    minX = minY = maxX = maxY = null;
-                }
-                else if (opName.equals("n") || opName.equals("h")) { 
-                    newTokens.addAll(currentPathTokens);
-                    currentPathTokens.clear();
-                    minX = minY = maxX = maxY = null;
-                }
-            }
-            token = parser.parseNextToken();
-        }
-        
-        newTokens.addAll(currentPathTokens);
-
-        // Rewrite the newly sanitized token list directly back to the PDF object dictionary
-        PDStream updatedStream = new PDStream(page.getCOSObject().getDoc());
-        try (OutputStream os = updatedStream.createOutputStream()) {
-            for (Object obj : newTokens) {
-                if (obj instanceof Operator) {
-                    os.write(((Operator) obj).getName().getBytes("ISO-8859-1"));
-                    os.write('\n');
-                } else if (obj instanceof COSBase) {
-                    ((COSBase) obj).writePDF(os);
-                    os.write(' ');
-                }
-            }
-        }
-        page.setContents(updatedStream);
-    }
-
-    /**
      * SCRIPT 2: THE ISOLATED MATRIX ANALYST
      */
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
-        private final List<Rectangle2D> lastApprovedKeepList = new ArrayList<>();
 
         public Script2Analyst(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
         }
 
-        public List<Rectangle2D> getLastApprovedKeepList() { 
-            return lastApprovedKeepList; 
-        }
-
-        public List<Rectangle2D> generateBlacklist() throws IOException {
-            // SCRIPT 1 INTERNAL EXECUTION: Pure memory capture. No content stream manipulation.
+        public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
+            // SCRIPT 1 IS ISOLATED HERE: Pure in-memory coordinate harvest
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
-            List<Rectangle2D> blacklist = new ArrayList<>();
+            List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
+            // Isolate items via your original size guidelines
             for (Rectangle2D shape : rawScoutedVectors) {
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
                     targetBoxesToAudit.add(new VisualBox(shape));
                 } else {
-                    lastApprovedKeepList.add(shape);
+                    approvedKeepList.add(shape);
                 }
             }
 
@@ -266,26 +149,30 @@ public class VectorRecolor {
                     }
                 }
 
-                filterSnapshotObjects(targetBoxesToAudit, blacklist);
+                filterSnapshotObjects(targetBoxesToAudit, approvedKeepList);
             }
 
             if (DEBUG_MODE) {
-                System.out.println(String.format("  -> [Isolation Matrix Verification] Extracted Blacklist Size: %d paths to purge.", blacklist.size()));
+                int elementsDropped = rawScoutedVectors.size() - approvedKeepList.size();
+                System.out.println(String.format("  -> [Snapshot Metric Verification] Pre-Filter: %d | Post-Filter Keep-List: %d | Omitted/Skipped: %d", 
+                        rawScoutedVectors.size(), approvedKeepList.size(), elementsDropped));
             }
 
-            return blacklist;
+            return approvedKeepList;
         }
 
-        private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> blacklist) {
+        private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
             float alignmentTolerance = 5.0f;  
             float sizeMatchTolerance = 2.0f;  
             float gapSearchLimit = 15.0f;     
+
+            int skipCount = 0;
 
             for (int i = 0; i < boxes.size(); i++) {
                 VisualBox target = boxes.get(i);
                 
                 if (!target.isEmptyArea) {
-                    lastApprovedKeepList.add(target.originalShape);
+                    approvedKeepList.add(target.originalShape);
                     continue;
                 }
 
@@ -325,14 +212,18 @@ public class VectorRecolor {
                 }
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
-                    blacklist.add(target.originalShape);
+                    skipCount++;
                     if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [AUDIT COMPLETED] Isolated Grid Artifact Line at X=%.1f, Y=%.1f", 
+                        System.out.println(String.format("    -> [REMOVAL CONFIRMED] Dropping targeted structural line from keep-list at X=%.1f, Y=%.1f", 
                                 target.originalShape.getX(), target.originalShape.getY()));
                     }
                 } else {
-                    lastApprovedKeepList.add(target.originalShape);
+                    approvedKeepList.add(target.originalShape);
                 }
+            }
+            
+            if (DEBUG_MODE) {
+                System.out.println(String.format("  -> [Filter Outcome] Successfully omitted %d lines from the drawing layer.", skipCount));
             }
         }
     }
@@ -344,7 +235,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: GRAPHICS SYSTEM VECTOR RECOGNITION PASS (SCOUT ENGINE)
+     * SCRIPT 1: RAW GRAPHICS VECTOR DISCOVERY PASS (SCOUT ENGINE)
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
