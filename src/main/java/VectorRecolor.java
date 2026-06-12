@@ -20,7 +20,7 @@ import java.util.Map;
 
 public class VectorRecolor {
 
-    private static final boolean DEBUG_MODE = true;
+    private static final boolean VERBOSE_LOG = true;
 
     public static void main(String[] args) {
         File inputDir = new File("pdfs");
@@ -37,10 +37,10 @@ public class VectorRecolor {
         }
 
         for (File inputFile : files) {
-            File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
+            File outputFile = new File(outputDir, "stitched_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("TWIN-LINE INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
+            System.out.println("STRUCTURAL STITCHING COMPILER ACTIVE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -48,224 +48,235 @@ public class VectorRecolor {
 
                 for (int i = 0; i < totalPages; i++) {
                     PDPage page = document.getPage(i);
-                    System.out.println(String.format("\n>>> PROCESSING PAGE %d OF %d <<<", i + 1, totalPages));
+                    System.out.println(String.format("\n>>> COMPILED ANALYSIS FOR PAGE %d <<<", i + 1));
 
-                    // STAGE 1: Run analysis to locate locked references and target vertical lines
-                    Script2Analyst analyst = new Script2Analyst(page);
-                    List<Rectangle2D> linesToKeep = analyst.generateApprovedSnapshot();
+                    // STAGE 1: Structural Analysis & Layout Flow Detection
+                    LayoutCompiler compiler = new LayoutCompiler(page);
+                    compiler.analyzeLayoutFlow();
                     
-                    Map<Rectangle2D, Boolean> exclusionRegistry = analyst.getExclusionRegistry();
-                    List<Rectangle2D> lockedLineCoordinates = analyst.getLockedLineCoordinates();
+                    List<Rectangle2D> finalOptimizedLines = compiler.getStitchedLayoutLines();
 
-                    // STAGE 2: Precision Render Loop
-                    System.out.println(String.format("[STAGE 2] Running rendering loop. Dropping only locked lines and overlapping twins..."));
-                    if (!linesToKeep.isEmpty()) {
+                    // STAGE 2: Render Phase
+                    System.out.println("[STAGE 2] Committing optimized and stitched vector paths to canvas...");
+                    if (!finalOptimizedLines.isEmpty()) {
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
-
-                            float coordinateTolerance = 1.0f; // Sharp precision matching
                             int paintCount = 0;
 
-                            for (Rectangle2D cleanLine : linesToKeep) {
-                                boolean shouldDrop = false;
-
-                                // 1. Check the Registry Lock directly (Line 1)
-                                Boolean isExplicitlyLocked = exclusionRegistry.get(cleanLine);
-                                if (isExplicitlyLocked != null && isExplicitlyLocked) {
-                                    shouldDrop = true;
-                                }
-
-                                // 2. Check for the Overlapping Twin (Line 2)
-                                if (!shouldDrop) {
-                                    for (Rectangle2D lockedCoord : lockedLineCoordinates) {
-                                        // Only match if it's a vertical line segment sharing the exact X column and vertical space
-                                        boolean xMatches = Math.abs(cleanLine.getX() - lockedCoord.getX()) < coordinateTolerance;
-                                        boolean yMatches = Math.abs(cleanLine.getY() - lockedCoord.getY()) < coordinateTolerance;
-                                        boolean heightMatches = Math.abs(cleanLine.getHeight() - lockedCoord.getHeight()) < coordinateTolerance;
-
-                                        if (xMatches && yMatches && heightMatches) {
-                                            shouldDrop = true;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Target Drop Execution
-                                if (shouldDrop) {
-                                    if (DEBUG_MODE) {
-                                        System.out.println(String.format("  [TARGETED DROP SUCCESS] Dropped line at -> X=%.3f, Y=%.3f (W=%.3f, H=%.3f)", 
-                                                cleanLine.getX(), cleanLine.getY(), cleanLine.getWidth(), cleanLine.getHeight()));
-                                    }
-                                    continue; 
-                                }
-
-                                // Draw legitimate table headers, text boxes, top/bottom borders safely
+                            for (Rectangle2D path : finalOptimizedLines) {
                                 paintCount++;
                                 outputStream.addRect(
-                                    (float) cleanLine.getX(), 
-                                    (float) cleanLine.getY(), 
-                                    (float) cleanLine.getWidth(), 
-                                    (float) cleanLine.getHeight()
+                                    (float) path.getX(), 
+                                    (float) path.getY(), 
+                                    (float) path.getWidth(), 
+                                    (float) path.getHeight()
                                 );
                                 outputStream.stroke();
                             }
-                            System.out.println(String.format("  -> Render loop finished. Approved paths painted: %d", paintCount));
+                            System.out.println(String.format("  -> Render complete. Painted %d structural lines.", paintCount));
                         }
                     }
-                    System.out.println(String.format(">>> PAGE %d PROCESSING COMPLETE <<<\n", i + 1));
                 }
 
-                System.out.println("[FINALIZE] Saving PDF...");
+                System.out.println("[FINALIZE] Saving file...");
                 document.save(outputFile);
-                System.out.println("[SUCCESS] Processing completed. Output available at: " + outputFile.getAbsolutePath());
+                System.out.println("[SUCCESS] Stitched document generated at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[FATAL SYSTEM ERROR] Pipeline aborted: " + e.getMessage());
+                System.err.println("[FATAL SYSTEM CRASH] " + e.getMessage());
             }
         }
     }
 
     /**
-     * SCRIPT 2: REGISTRY LOCK ANALYST
+     * ADVANCED STRUCTURAL LAYOUT COMPILER
      */
-    private static class Script2Analyst {
+    private static class LayoutCompiler {
         private final PDPage page;
         private final float pageHeight;
-        private final Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
-        private final List<Rectangle2D> lockedLineCoordinates = new ArrayList<>();
+        private final List<Rectangle2D> rawVectors = new ArrayList<>();
+        private final List<Rectangle2D> stitchedLinesOutput = new ArrayList<>();
 
-        public Script2Analyst(PDPage page) {
+        public LayoutCompiler(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
         }
 
-        public Map<Rectangle2D, Boolean> getExclusionRegistry() {
-            return exclusionRegistry;
+        public List<Rectangle2D> getStitchedLayoutLines() {
+            return stitchedLinesOutput;
         }
 
-        public List<Rectangle2D> getLockedLineCoordinates() {
-            return lockedLineCoordinates;
-        }
-
-        public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
+        public void analyzeLayoutFlow() throws IOException {
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
-            List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
-            
-            List<Rectangle2D> approvedKeepList = new ArrayList<>();
-            List<VisualBox> targetBoxesToAudit = new ArrayList<>();
+            rawVectors.addAll(scout.getDetectedBoxes());
 
-            for (Rectangle2D shape : rawScoutedVectors) {
-                exclusionRegistry.put(shape, false); 
-                if (shape.getWidth() > 2.0 && shape.getHeight() > 2.0) {
-                    targetBoxesToAudit.add(new VisualBox(shape, shape)); 
+            List<VisualCell> allCells = new ArrayList<>();
+            for (Rectangle2D vector : rawVectors) {
+                if (vector.getWidth() > 2.0 && vector.getHeight() > 2.0) {
+                    allCells.add(new VisualCell(vector));
+                } else {
+                    // Retain standalone pure line paths instantly
+                    stitchedLinesOutput.add(vector);
                 }
             }
 
-            if (!targetBoxesToAudit.isEmpty()) {
-                PDFTextStripperByArea stripper = new PDFTextStripperByArea();
-                stripper.setSortByPosition(true);
+            if (allCells.isEmpty()) return;
 
-                for (int b = 0; b < targetBoxesToAudit.size(); b++) {
-                    Rectangle2D rawBounds = targetBoxesToAudit.get(b).transformedShape;
-                    float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
-                    stripper.addRegion("reg_" + b, new Rectangle2D.Float(
-                            (float)rawBounds.getX() + 0.5f, awtY + 0.5f, (float)rawBounds.getWidth() - 1.0f, (float)rawBounds.getHeight() - 1.0f));
-                }
+            // Extract Text Content for accurate emptiness validation
+            PDFTextStripperByArea stripper = new PDFTextStripperByArea();
+            stripper.setSortByPosition(true);
+            for (int c = 0; c < allCells.size(); c++) {
+                Rectangle2D r = allCells.get(c).bounds;
+                float awtY = pageHeight - (float)r.getY() - (float)r.getHeight();
+                stripper.addRegion("c_" + c, new Rectangle2D.Float(
+                        (float)r.getX() + 0.5f, awtY + 0.5f, (float)r.getWidth() - 1.0f, (float)r.getHeight() - 1.0f));
+            }
+            stripper.extractRegions(page);
 
-                stripper.extractRegions(page);
+            for (int c = 0; c < allCells.size(); c++) {
+                VisualCell cell = allCells.get(c);
+                cell.isEmpty = stripper.getTextForRegion("c_" + c).trim().isEmpty();
+            }
 
-                for (int b = 0; b < targetBoxesToAudit.size(); b++) {
-                    VisualBox box = targetBoxesToAudit.get(b);
-                    String extractedText = stripper.getTextForRegion("reg_" + b).trim();
-                    
-                    boolean textIsEmpty = extractedText.isEmpty();
-                    boolean isStructuralGapColumn = (box.transformedShape.getWidth() > 3.0 && box.transformedShape.getWidth() < 22.0);
+            // Determine Layout Flows & Adjacency Matrix
+            float tolerance = 1.5f;
+            for (VisualCell current : allCells) {
+                boolean rowRepeat = false;
+                boolean colRepeat = false;
+                VisualCell neighborToStitch = null;
 
-                    if (textIsEmpty || isStructuralGapColumn) {
-                        box.isEmptyArea = true;
+                for (VisualCell neighbor : allCells) {
+                    if (current == neighbor) continue;
+
+                    boolean sameRow = Math.abs(current.bounds.getY() - neighbor.bounds.getY()) < tolerance;
+                    boolean sameCol = Math.abs(current.bounds.getX() - neighbor.bounds.getX()) < tolerance;
+
+                    if (sameRow) {
+                        rowRepeat = true;
+                        // Track left-to-right neighbor adjacency for stitching extensions
+                        if (Math.abs((current.bounds.getX() + current.bounds.getWidth()) - neighbor.bounds.getX()) < 3.0f ||
+                            Math.abs((neighbor.bounds.getX() + neighbor.bounds.getWidth()) - current.bounds.getX()) < 3.0f) {
+                            if (!neighbor.isEmpty) neighborToStitch = neighbor;
+                        }
+                    }
+                    if (sameCol) {
+                        colRepeat = true;
+                        // Track top-to-bottom neighbor adjacency for stitching extensions
+                        if (Math.abs((current.bounds.getY() + current.bounds.getHeight()) - neighbor.bounds.getY()) < 3.0f ||
+                            Math.abs((neighbor.bounds.getY() + neighbor.bounds.getHeight()) - current.bounds.getY()) < 3.0f) {
+                            if (!neighbor.isEmpty) neighborToStitch = neighbor;
+                        }
                     }
                 }
 
-                filterSnapshotObjects(targetBoxesToAudit);
+                // Categorize Flow State Rules
+                if (rowRepeat && colRepeat)      current.flow = TableFlow.BIDIRECTIONAL;
+                else if (rowRepeat)              current.flow = TableFlow.LEFT_TO_RIGHT;
+                else if (colRepeat)              current.flow = TableFlow.TOP_TO_BOTTOM;
+                else                             current.flow = TableFlow.NOT_A_TABLE;
+
+                current.adjacentDataCell = neighborToStitch;
             }
 
-            for (Rectangle2D originalVector : rawScoutedVectors) {
-                approvedKeepList.add(originalVector);
-            }
+            // Process line extractions and layout stitching overrides
+            for (VisualCell cell : allCells) {
+                if (!cell.isEmpty) {
+                    // Valid cell: Keep all 4 lines as standard structural grid lines
+                    addBoxEdgesToList(cell.bounds);
+                    continue;
+                }
 
-            return approvedKeepList;
+                if (VERBOSE_LOG) {
+                    System.out.println(String.format("[FLOW EVAL] Empty Box discovered at X=%.3f, Y=%.3f | Flow Type Detected: %s", 
+                            cell.bounds.getX(), cell.bounds.getY(), cell.flow));
+                }
+
+                // Apply targeted edge stripping and stitching mechanics based on Flow Type
+                switch (cell.flow) {
+                    case LEFT_TO_RIGHT:
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Left-to-Right: Stripping LEFT edge. Preserving top, bottom, right.");
+                        // Strip Left: Send only top, bottom, and right to output list
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY() + cell.bounds.getHeight(), cell.bounds.getWidth(), 0.75)); // Top
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), cell.bounds.getWidth(), 0.75)); // Bottom
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX() + cell.bounds.getWidth(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Right
+
+                        // STITCH EXTENSION: Extend neighboring valid table cell lines horizontally
+                        if (cell.adjacentDataCell != null) {
+                            if (VERBOSE_LOG) {
+                                System.out.println(String.format("  -> [STITCH MACHINE] Extending neighboring valid table cell (X=%.3f) lines horizontally by Width: %.3f", 
+                                        cell.adjacentDataCell.bounds.getX(), cell.bounds.getWidth()));
+                            }
+                            cell.adjacentDataCell.bounds.setRect(
+                                Math.min(cell.adjacentDataCell.bounds.getX(), cell.bounds.getX()),
+                                cell.adjacentDataCell.bounds.getY(),
+                                cell.adjacentDataCell.bounds.getWidth() + cell.bounds.getWidth(),
+                                cell.adjacentDataCell.bounds.getHeight()
+                            );
+                        }
+                        break;
+
+                    case TOP_TO_BOTTOM:
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Top-to-Bottom: Stripping TOP edge. Preserving bottom, left, right.");
+                        // Strip Top: Send only bottom, left, and right to output list
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), cell.bounds.getWidth(), 0.75)); // Bottom
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Left
+                        stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX() + cell.bounds.getWidth(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Right
+
+                        // STITCH EXTENSION: Extend neighboring valid table cell lines vertically
+                        if (cell.adjacentDataCell != null) {
+                            if (VERBOSE_LOG) {
+                                System.out.println(String.format("  -> [STITCH MACHINE] Extending neighboring valid table cell (Y=%.3f) lines vertically by Height: %.3f", 
+                                        cell.adjacentDataCell.bounds.getY(), cell.bounds.getHeight()));
+                            }
+                            cell.adjacentDataCell.bounds.setRect(
+                                cell.adjacentDataCell.bounds.getX(),
+                                Math.min(cell.adjacentDataCell.bounds.getY(), cell.bounds.getY()),
+                                cell.adjacentDataCell.bounds.getWidth(),
+                                cell.adjacentDataCell.bounds.getHeight() + cell.bounds.getHeight()
+                            );
+                        }
+                        break;
+
+                    case BIDIRECTIONAL:
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Bidirectional Flow: Protecting all lines. No removal executed.");
+                        addBoxEdgesToList(cell.bounds);
+                        break;
+
+                    case NOT_A_TABLE:
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Isolated Non-Table Artifact: Stripping ALL 4 lines for removal.");
+                        // Do not add any edge segments to stitchedLinesOutput, effectively erasing the object
+                        break;
+                }
+            }
         }
 
-        private void filterSnapshotObjects(List<VisualBox> boxes) {
-            float alignmentTolerance = 1.0f;  
-            float sizeMatchTolerance = 1.0f;  
-            float gapSearchLimit = 0.5f; // Force adjacency matching
-
-            for (int i = 0; i < boxes.size(); i++) {
-                VisualBox target = boxes.get(i);
-                if (!target.isEmptyArea) continue;
-
-                boolean immediateRowRepeat = false;
-                boolean immediateColRepeat = false;
-
-                for (VisualBox neighbor : boxes) {
-                    if (target == neighbor) continue;
-                    boolean onSameRow = Math.abs(target.transformedShape.getY() - neighbor.transformedShape.getY()) < alignmentTolerance;
-                    boolean matchHeight = Math.abs(target.transformedShape.getHeight() - neighbor.transformedShape.getHeight()) < sizeMatchTolerance;
-                    
-                    if (onSameRow && matchHeight) {
-                        double distanceLeft = target.transformedShape.getX() - (neighbor.transformedShape.getX() + neighbor.transformedShape.getWidth());
-                        double distanceRight = neighbor.transformedShape.getX() - (target.transformedShape.getX() + target.transformedShape.getWidth());
-                        if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
-                            (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
-                            immediateRowRepeat = true;
-                            break; 
-                        }
-                    }
-                }
-
-                for (VisualBox neighbor : boxes) {
-                    if (target == neighbor) continue;
-                    boolean onSameCol = Math.abs(target.transformedShape.getX() - neighbor.transformedShape.getX()) < alignmentTolerance;
-                    boolean matchWidth = Math.abs(target.transformedShape.getWidth() - neighbor.transformedShape.getWidth()) < sizeMatchTolerance;
-
-                    if (onSameCol && matchWidth) {
-                        double distanceAbove = target.transformedShape.getY() - (neighbor.transformedShape.getY() + neighbor.transformedShape.getHeight());
-                        double distanceBelow = neighbor.transformedShape.getY() - (target.transformedShape.getY() + target.transformedShape.getHeight());
-                        if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
-                            (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
-                            immediateColRepeat = true;
-                            break; 
-                        }
-                    }
-                }
-
-                // If it hits the row layout repeat structure, log it explicitly
-                if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
-                    exclusionRegistry.put(target.rawSourceLineReference, true); 
-                    lockedLineCoordinates.add(target.rawSourceLineReference);
-                }
-            }
+        private void addBoxEdgesToList(Rectangle2D box) {
+            stitchedLinesOutput.add(new Rectangle2D.Double(box.getX(), box.getY() + box.getHeight(), box.getWidth(), 0.75)); // Top
+            stitchedLinesOutput.add(new Rectangle2D.Double(box.getX(), box.getY(), box.getWidth(), 0.75)); // Bottom
+            stitchedLinesOutput.add(new Rectangle2D.Double(box.getX(), box.getY(), 0.75, box.getHeight())); // Left
+            stitchedLinesOutput.add(new Rectangle2D.Double(box.getX() + box.getWidth(), box.getY(), 0.75, box.getHeight())); // Right
         }
     }
 
-    private static class VisualBox {
-        final Rectangle2D transformedShape;
-        final Rectangle2D rawSourceLineReference;
-        boolean isEmptyArea = false;
-        
-        VisualBox(Rectangle2D transformed, Rectangle2D rawSource) { 
-            this.transformedShape = transformed; 
-            this.rawSourceLineReference = rawSource;
+    private enum TableFlow { LEFT_TO_RIGHT, TOP_TO_BOTTOM, BIDIRECTIONAL, NOT_A_TABLE }
+
+    private static class VisualCell {
+        final Rectangle2D bounds;
+        boolean isEmpty = false;
+        TableFlow flow = TableFlow.NOT_A_TABLE;
+        VisualCell adjacentDataCell = null;
+
+        VisualCell(Rectangle2D bounds) {
+            this.bounds = bounds;
         }
     }
 
     /**
-     * SCRIPT 1: CORE VECTOR PATH SCOUT
+     * SCRIPT 1: RAW VECTOR EXTRACTION ENGINE
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
