@@ -4,6 +4,7 @@ import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.cos.COSName; // <-- Added import for the missing method
 import org.apache.pdfbox.Loader;
 
 import java.awt.Color;
@@ -19,7 +20,6 @@ public class VectorRecolor {
     private static final boolean SAVE_DRAWINGS_ONLY = true;
 
     public static void main(String[] args) {
-        // Hardcoded directories matching the GitHub Action structure
         File inputDir = new File("pdfs");
         File outputDir = new File("output_artifacts");
 
@@ -145,5 +145,11 @@ public class VectorRecolor {
 
         @Override
         public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+
+        // --- THE FIX: Implementing the missing abstract method ---
+        @Override
+        public void shadingFill(COSName shadingName) throws IOException {
+            // Left empty intentionally as we are only tracking vector outlines
+        }
     }
 }
