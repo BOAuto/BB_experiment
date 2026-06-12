@@ -301,4 +301,80 @@ public class VectorRecolor {
                         double distanceLeft = target.originalShape.getX() - (neighbor.originalShape.getX() + neighbor.originalShape.getWidth());
                         double distanceRight = neighbor.originalShape.getX() - (target.originalShape.getX() + target.originalShape.getWidth());
                         if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
-                            (distanceRight >= -alignmentTolerance && distanceRight <=
+                            (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
+                            immediateRowRepeat = true;
+                            break; 
+                        }
+                    }
+                }
+
+                for (VisualBox neighbor : boxes) {
+                    if (target == neighbor) continue;
+                    boolean onSameCol = Math.abs(target.originalShape.getX() - neighbor.originalShape.getX()) < alignmentTolerance;
+                    boolean matchWidth = Math.abs(target.originalShape.getWidth() - neighbor.originalShape.getWidth()) < sizeMatchTolerance;
+
+                    if (onSameCol && matchWidth) {
+                        double distanceAbove = target.originalShape.getY() - (neighbor.originalShape.getY() + neighbor.originalShape.getHeight());
+                        double distanceBelow = neighbor.originalShape.getY() - (target.originalShape.getY() + target.originalShape.getHeight());
+                        if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
+                            (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
+                            immediateColRepeat = true;
+                            break; 
+                        }
+                    }
+                }
+
+                if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
+                    blacklist.add(target.originalShape);
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("    -> [AUDIT COMPLETED] Isolated Grid Artifact Line at X=%.1f, Y=%.1f", 
+                                target.originalShape.getX(), target.originalShape.getY()));
+                    }
+                } else {
+                    lastApprovedKeepList.add(target.originalShape);
+                }
+            }
+        }
+    }
+
+    private static class VisualBox {
+        Rectangle2D originalShape;
+        boolean isEmptyArea = false;
+        VisualBox(Rectangle2D shape) { this.originalShape = shape; }
+    }
+
+    /**
+     * SCRIPT 1: GRAPHICS SYSTEM VECTOR RECOGNITION PASS (SCOUT ENGINE)
+     */
+    private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
+        private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
+        private Double minX, minY, maxX, maxY;
+
+        protected DrawingBoxEngine(PDPage page) { super(page); }
+        public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
+
+        private void updateBounds(double x, double y) {
+            if (minX == null) { minX = maxX = x; minY = maxY = y; } 
+            else { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+        }
+
+        private void flushPath() {
+            if (minX != null) { detectedBoxes.add(new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY)); minX = minY = maxX = maxY = null; }
+        }
+
+        @Override
+        public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException { updateBounds(p0.getX(), p0.getY()); updateBounds(p2.getX(), p2.getY()); }
+        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException { updateBounds(x1, y1); updateBounds(x3, y3); }
+        @Override public void strokePath() throws IOException { flushPath(); }
+        @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
+        @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
+        @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage pdImage) throws IOException {}
+        @Override public void clip(int windingRule) throws IOException {}
+        @Override public void closePath() throws IOException {}
+        @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public void shadingFill(COSName shadingName) throws IOException {}
+    }
+}
