@@ -344,7 +344,7 @@ public class VectorRecolor {
         @Override public void clip(int windingRule) throws IOException {}
         @Override public void closePath() throws IOException {}
         @Override public void endPath() throws IOException { minX = minY = maxX = maxY = null; }
-        @Override Point2D public getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
+        @Override public Point2D getCurrentPoint() throws IOException { return new Point2D.Float(0, 0); }
         @Override public void shadingFill(COSName shadingName) throws IOException {}
     }
 }
