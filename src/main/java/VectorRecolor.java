@@ -40,7 +40,7 @@ public class VectorRecolor {
             File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("LOG ENGINE INITIALIZED FOR FILE: " + inputFile.getName());
+            System.out.println("COORDINATE INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -50,11 +50,13 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n>>> PROCESSING PAGE %d OF %d <<<", i + 1, totalPages));
 
-                    System.out.println("[STAGE 1] Invoking Isolated Analysis Engine with active reference maps...");
+                    // STAGE 1: Gather approved paths and identify blacklisted coordinate zones
                     Script2Analyst analyst = new Script2Analyst(page);
                     List<Rectangle2D> linesToKeep = analyst.generateApprovedSnapshot();
+                    List<Rectangle2D> strictBannedZones = analyst.getBannedCoordinateZones();
 
-                    System.out.println(String.format("[STAGE 2] Beginning production rendering phase for %d approved shapes...", linesToKeep.size()));
+                    // STAGE 2: Render phase with an unbypassable spatial block filter
+                    System.out.println(String.format("[STAGE 2] Running rendering loop. Filtering paths against explicit coordinates..."));
                     if (!linesToKeep.isEmpty()) {
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
@@ -62,14 +64,37 @@ public class VectorRecolor {
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
 
+                            float coordinateSnappingWindow = 1.5f; // Hard alignment tolerance window
                             int paintCount = 0;
+
                             for (Rectangle2D cleanLine : linesToKeep) {
-                                paintCount++;
-                                if (DEBUG_MODE) {
-                                    System.out.println(String.format("  [RENDER-EXEC] Drawing Green Shape #%d -> X=%.3f, Y=%.3f, W=%.3f, H=%.3f", 
-                                            paintCount, cleanLine.getX(), cleanLine.getY(), cleanLine.getWidth(), cleanLine.getHeight()));
+                                boolean coordinateMatchFound = false;
+
+                                // Evaluate this exact line coordinate against our target blacklist
+                                for (Rectangle2D bannedZone : strictBannedZones) {
+                                    
+                                    // 1. Does the X position align precisely with the artifact column?
+                                    boolean xMatches = Math.abs(cleanLine.getX() - bannedZone.getX()) < coordinateSnappingWindow;
+                                    
+                                    // 2. Does it fall within the vertical span of that artifact area?
+                                    boolean insideVerticalBounds = cleanLine.getY() >= (bannedZone.getY() - coordinateSnappingWindow) &&
+                                                                   cleanLine.getY() <= (bannedZone.getY() + bannedZone.getHeight() + coordinateSnappingWindow);
+
+                                    if (xMatches && insideVerticalBounds) {
+                                        coordinateMatchFound = true;
+                                        break;
+                                    }
                                 }
-                                
+
+                                // HARD BLOCK INTERCEPT: If coordinates match, do not draw it under any circumstance
+                                if (coordinateMatchFound) {
+                                    System.out.println(String.format("  [INTERCEPT SUCCESS] Blocked drawing green line at exact coordinate -> X=%.3f, Y=%.3f (H=%.3f)", 
+                                            cleanLine.getX(), cleanLine.getY(), cleanLine.getHeight()));
+                                        continue; 
+                                }
+
+                                // Draw line if it passes the spatial coordinate barrier
+                                paintCount++;
                                 outputStream.addRect(
                                     (float) cleanLine.getX(), 
                                     (float) cleanLine.getY(), 
@@ -78,31 +103,37 @@ public class VectorRecolor {
                                 );
                                 outputStream.stroke();
                             }
+                            System.out.println(String.format("  -> Render finished. Drew %d green lines safely.", paintCount));
                         }
                     }
                     System.out.println(String.format(">>> PAGE %d PROCESSING COMPLETE <<<\n", i + 1));
                 }
 
-                System.out.println("[FINALIZE] Writing output to disk...");
+                System.out.println("[FINALIZE] Saving file...");
                 document.save(outputFile);
-                System.out.println("[SUCCESS] System telemetry saved down at: " + outputFile.getAbsolutePath());
+                System.out.println("[SUCCESS] Clean output file generated at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[FATAL SYSTEM CRASH] Pipeline stopped: " + e.getMessage());
+                System.err.println("[FATAL CRASH] Pipeline stopped: " + e.getMessage());
             }
         }
     }
 
     /**
-     * SCRIPT 2: UNCONSTRAINED REFERENCE ANALYST (NO GATES)
+     * SCRIPT 2: COORDINATE EXTRACTION ANALYST
      */
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
+        private final List<Rectangle2D> bannedCoordinateZones = new ArrayList<>();
 
         public Script2Analyst(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
+        }
+
+        public List<Rectangle2D> getBannedCoordinateZones() {
+            return bannedCoordinateZones;
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
@@ -110,31 +141,17 @@ public class VectorRecolor {
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
-            System.out.println(String.format("  [SCOUT-OUTCOME] Extracted %d total raw vector paths from stream content.", rawScoutedVectors.size()));
-            
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
-            
-            // The exclusion registry tracks EVERY single vector reference found on the page
             Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
 
-            // ==========================================================================
-            // STEP 1: UNIFIED INITIAL REGISTRATION
-            // Every vector path is marked safe ('false') by default. No sizing gates.
-            // ==========================================================================
             for (Rectangle2D shape : rawScoutedVectors) {
                 exclusionRegistry.put(shape, false); 
-
-                // Size metrics are used strictly to protect the PDFTextStripper boundary space,
-                // NEVER to keep a path segment from being swept up and dropped later.
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 2.0) {
                     targetBoxesToAudit.add(new VisualBox(shape, shape)); 
                 }
             }
 
-            // ==========================================================================
-            // STEP 2: ARTIFACT MATRIX PATTERN EVALUATION
-            // ==========================================================================
             if (!targetBoxesToAudit.isEmpty()) {
                 PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                 stripper.setSortByPosition(true);
@@ -142,7 +159,6 @@ public class VectorRecolor {
                 for (int b = 0; b < targetBoxesToAudit.size(); b++) {
                     Rectangle2D rawBounds = targetBoxesToAudit.get(b).transformedShape;
                     float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
-                    
                     stripper.addRegion("reg_" + b, new Rectangle2D.Float(
                             (float)rawBounds.getX() + 0.5f, awtY + 0.5f, (float)rawBounds.getWidth() - 1.0f, (float)rawBounds.getHeight() - 1.0f));
                 }
@@ -161,60 +177,13 @@ public class VectorRecolor {
                     }
                 }
 
-                // If a container matches an artifact grid pattern, its registry reference switches to TRUE (EXCLUDE)
                 filterSnapshotObjects(targetBoxesToAudit, exclusionRegistry);
             }
 
-            // ==========================================================================
-            // STEP 3: HIGH-PRECISION LOOKBACK INTERCEPTOR
-            // Catch lines of ANY scale or rotation that snap horizontally to a dropped box area.
-            // ==========================================================================
-            float spatialSnappingTolerance = 3.0f; 
-
+            // Populate cleanly back into our array list loop
             for (Rectangle2D originalVector : rawScoutedVectors) {
-                Boolean isMarkedForExclusion = exclusionRegistry.get(originalVector);
-                
-                // Primary check: Drop immediately if the map registered an explicit instance removal
-                if (isMarkedForExclusion != null && isMarkedForExclusion) {
-                    if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [PRIMARY DROP SUCCESS] Excluded flagged container instance at X=%.3f, Y=%.3f", 
-                                originalVector.getX(), originalVector.getY()));
-                    }
-                    continue; 
-                }
-
-                // Secondary Deep Spatial Check: Check if this path matches coordinates of a dropped container
-                boolean matchesBannedCoordinates = false;
-                for (VisualBox auditedBox : targetBoxesToAudit) {
-                    if (auditedBox.isArtifactLine) { 
-                        
-                        // Check if the lines align horizontally on the layout grid
-                        boolean sameXColumn = Math.abs(originalVector.getX() - auditedBox.transformedShape.getX()) < spatialSnappingTolerance;
-                        
-                        // Check if the line falls inside or right on the vertical span perimeter of that cell
-                        boolean insideVerticalSpan = originalVector.getY() >= auditedBox.transformedShape.getY() - spatialSnappingTolerance &&
-                                                     originalVector.getY() <= (auditedBox.transformedShape.getY() + auditedBox.transformedShape.getHeight() + spatialSnappingTolerance);
-
-                        if (sameXColumn && insideVerticalSpan) {
-                            matchesBannedCoordinates = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (matchesBannedCoordinates) {
-                    if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [RENDER BLOCK] Blocked stray border/fragment line at X=%.3f, Y=%.3f (H=%.3f)", 
-                                originalVector.getX(), originalVector.getY(), originalVector.getHeight()));
-                    }
-                    continue; // Skip appending to green line pass completely!
-                }
-
                 approvedKeepList.add(originalVector);
             }
-
-            System.out.println(String.format("  [METRICS SUMMARY] Discovered: %d | Sent to Render Loop: %d | Denied/Dropped: %d", 
-                    rawScoutedVectors.size(), approvedKeepList.size(), (rawScoutedVectors.size() - approvedKeepList.size())));
 
             return approvedKeepList;
         }
@@ -264,8 +233,9 @@ public class VectorRecolor {
                 }
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
-                    target.isArtifactLine = true; 
                     exclusionRegistry.put(target.rawSourceLineReference, true); 
+                    // Lock these coordinates into our master blacklist zone map
+                    bannedCoordinateZones.add(target.transformedShape);
                 }
             }
         }
@@ -275,7 +245,6 @@ public class VectorRecolor {
         final Rectangle2D transformedShape;
         final Rectangle2D rawSourceLineReference;
         boolean isEmptyArea = false;
-        boolean isArtifactLine = false; 
         
         VisualBox(Rectangle2D transformed, Rectangle2D rawSource) { 
             this.transformedShape = transformed; 
@@ -284,7 +253,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: RAW VECTORS SUB-LEVEL INTERCEPTOR
+     * SCRIPT 1: RAW VECTORS EXTRACTOR
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
@@ -300,8 +269,7 @@ public class VectorRecolor {
 
         private void flushPath() {
             if (minX != null) {
-                Rectangle2D pathSegment = new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY);
-                detectedBoxes.add(pathSegment);
+                detectedBoxes.add(new Rectangle2D.Double(minX, minY, maxX - minX, maxY - minY));
                 minX = minY = maxX = maxY = null; 
             }
         }
