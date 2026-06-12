@@ -40,7 +40,7 @@ public class VectorRecolor {
             File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("COORDINATE INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
+            System.out.println("CELL-FUSION INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -50,13 +50,13 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n>>> PROCESSING PAGE %d OF %d <<<", i + 1, totalPages));
 
-                    // STAGE 1: Gather approved paths and identify blacklisted coordinate zones
+                    // STAGE 1: Process page and extract fused artifact boundary zones
                     Script2Analyst analyst = new Script2Analyst(page);
                     List<Rectangle2D> linesToKeep = analyst.generateApprovedSnapshot();
                     List<Rectangle2D> strictBannedZones = analyst.getBannedCoordinateZones();
 
-                    // STAGE 2: Render phase with an unbypassable spatial block filter
-                    System.out.println(String.format("[STAGE 2] Running rendering loop. Filtering paths against explicit coordinates..."));
+                    // STAGE 2: Render phase with shared-wall suppression filter
+                    System.out.println(String.format("[STAGE 2] Running rendering loop. Dropping intersecting artifact paths..."));
                     if (!linesToKeep.isEmpty()) {
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
@@ -64,36 +64,56 @@ public class VectorRecolor {
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
 
-                            float coordinateSnappingWindow = 1.5f; // Hard alignment tolerance window
+                            float snappingWindow = 1.5f; // Structural alignment snapping box
                             int paintCount = 0;
 
                             for (Rectangle2D cleanLine : linesToKeep) {
-                                boolean coordinateMatchFound = false;
+                                boolean isAnArtifactBorderLine = false;
 
-                                // Evaluate this exact line coordinate against our target blacklist
-                                for (Rectangle2D bannedZone : strictBannedZones) {
-                                    
-                                    // 1. Does the X position align precisely with the artifact column?
-                                    boolean xMatches = Math.abs(cleanLine.getX() - bannedZone.getX()) < coordinateSnappingWindow;
-                                    
-                                    // 2. Does it fall within the vertical span of that artifact area?
-                                    boolean insideVerticalBounds = cleanLine.getY() >= (bannedZone.getY() - coordinateSnappingWindow) &&
-                                                                   cleanLine.getY() <= (bannedZone.getY() + bannedZone.getHeight() + coordinateSnappingWindow);
+                                for (Rectangle2D bannedBox : strictBannedZones) {
+                                    double boxLeftX   = bannedBox.getX();
+                                    double boxRightX  = bannedBox.getX() + bannedBox.getWidth();
+                                    double boxBottomY = bannedBox.getY();
+                                    double boxTopY    = bannedBox.getY() + bannedBox.getHeight();
 
-                                    if (xMatches && insideVerticalBounds) {
-                                        coordinateMatchFound = true;
-                                        break;
+                                    // SANITY CHECK: Handle Vertical Lines (Left/Right Boundaries)
+                                    if (cleanLine.getHeight() > cleanLine.getWidth()) {
+                                        boolean matchesLeftFlank  = Math.abs(cleanLine.getX() - boxLeftX) < snappingWindow;
+                                        boolean matchesRightFlank = Math.abs(cleanLine.getX() - boxRightX) < snappingWindow;
+                                        
+                                        boolean insideVerticalSpan = cleanLine.getY() >= (boxBottomY - snappingWindow) &&
+                                                                     cleanLine.getY() <= (boxTopY + snappingWindow);
+
+                                        // If it hits either side of the artifact block, block it immediately
+                                        // regardless of whether an adjacent cell attempts to draw it.
+                                        if ((matchesLeftFlank || matchesRightFlank) && insideVerticalSpan) {
+                                            isAnArtifactBorderLine = true;
+                                            break;
+                                        }
+                                    } 
+                                    // SANITY CHECK: Handle Horizontal Lines (Top/Bottom Boundaries)
+                                    else {
+                                        boolean matchesBottomFlank = Math.abs(cleanLine.getY() - boxBottomY) < snappingWindow;
+                                        boolean matchesTopFlank    = Math.abs(cleanLine.getY() - boxTopY) < snappingWindow;
+                                        
+                                        boolean insideHorizontalSpan = cleanLine.getX() >= (boxLeftX - snappingWindow) &&
+                                                                       cleanLine.getX() <= (boxRightX + snappingWindow);
+
+                                        if ((matchesBottomFlank || matchesTopFlank) && insideHorizontalSpan) {
+                                            isAnArtifactBorderLine = true;
+                                            break;
+                                        }
                                     }
                                 }
 
-                                // HARD BLOCK INTERCEPT: If coordinates match, do not draw it under any circumstance
-                                if (coordinateMatchFound) {
-                                    System.out.println(String.format("  [INTERCEPT SUCCESS] Blocked drawing green line at exact coordinate -> X=%.3f, Y=%.3f (H=%.3f)", 
-                                            cleanLine.getX(), cleanLine.getY(), cleanLine.getHeight()));
-                                        continue; 
+                                if (isAnArtifactBorderLine) {
+                                    if (DEBUG_MODE) {
+                                        System.out.println(String.format("  [OVERPOLICED DROP SUCCESS] Blocked shared edge line at -> X=%.3f, Y=%.3f", 
+                                                cleanLine.getX(), cleanLine.getY()));
+                                    }
+                                    continue; 
                                 }
 
-                                // Draw line if it passes the spatial coordinate barrier
                                 paintCount++;
                                 outputStream.addRect(
                                     (float) cleanLine.getX(), 
@@ -103,24 +123,24 @@ public class VectorRecolor {
                                 );
                                 outputStream.stroke();
                             }
-                            System.out.println(String.format("  -> Render finished. Drew %d green lines safely.", paintCount));
+                            System.out.println(String.format("  -> Render loop complete. Green line paths drawn: %d", paintCount));
                         }
                     }
                     System.out.println(String.format(">>> PAGE %d PROCESSING COMPLETE <<<\n", i + 1));
                 }
 
-                System.out.println("[FINALIZE] Saving file...");
+                System.out.println("[FINALIZE] Saving modified PDF document...");
                 document.save(outputFile);
-                System.out.println("[SUCCESS] Clean output file generated at: " + outputFile.getAbsolutePath());
+                System.out.println("[SUCCESS] Clean file generated at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[FATAL CRASH] Pipeline stopped: " + e.getMessage());
+                System.err.println("[FATAL ERROR] Pipeline terminated unexpectedly: " + e.getMessage());
             }
         }
     }
 
     /**
-     * SCRIPT 2: COORDINATE EXTRACTION ANALYST
+     * SCRIPT 2: FUSION-ENABLED ANALYST
      */
     private static class Script2Analyst {
         private final PDPage page;
@@ -180,7 +200,6 @@ public class VectorRecolor {
                 filterSnapshotObjects(targetBoxesToAudit, exclusionRegistry);
             }
 
-            // Populate cleanly back into our array list loop
             for (Rectangle2D originalVector : rawScoutedVectors) {
                 approvedKeepList.add(originalVector);
             }
@@ -193,6 +212,9 @@ public class VectorRecolor {
             float sizeMatchTolerance = 2.0f;  
             float gapSearchLimit = 15.0f;     
 
+            List<VisualBox> artifactBoxes = new ArrayList<>();
+
+            // 1. Establish initial structural row and column repeats
             for (int i = 0; i < boxes.size(); i++) {
                 VisualBox target = boxes.get(i);
                 if (!target.isEmptyArea) continue;
@@ -234,10 +256,51 @@ public class VectorRecolor {
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
                     exclusionRegistry.put(target.rawSourceLineReference, true); 
-                    // Lock these coordinates into our master blacklist zone map
-                    bannedCoordinateZones.add(target.transformedShape);
+                    artifactBoxes.add(target);
                 }
             }
+
+            // ==========================================================================
+            // STEP 2: CELL FUSION MATRIX MACHINE
+            // Merge side-by-side or stacked empty container paths into unified tracking footprints
+            // ==========================================================================
+            List<Rectangle2D> fusedZones = new ArrayList<>();
+            boolean[] mergedFlags = new boolean[artifactBoxes.size()];
+
+            for (int i = 0; i < artifactBoxes.size(); i++) {
+                if (mergedFlags[i]) continue;
+                VisualBox current = artifactBoxes.get(i);
+                Rectangle2D.Double consolidatedBounds = new Rectangle2D.Double(
+                        current.transformedShape.getX(),
+                        current.transformedShape.getY(),
+                        current.transformedShape.getWidth(),
+                        current.transformedShape.getHeight()
+                );
+
+                for (int j = i + 1; j < artifactBoxes.size(); j++) {
+                    if (mergedFlags[j]) continue;
+                    VisualBox comparisonTarget = artifactBoxes.get(j);
+
+                    // Validate if they share a direct horizontal continuous line path
+                    boolean adjacentHorizontal = Math.abs(consolidatedBounds.getY() - comparisonTarget.transformedShape.getY()) < alignmentTolerance &&
+                                                 Math.abs(consolidatedBounds.getHeight() - comparisonTarget.transformedShape.getHeight()) < sizeMatchTolerance &&
+                                                 (Math.abs((consolidatedBounds.getX() + consolidatedBounds.getWidth()) - comparisonTarget.transformedShape.getX()) < alignmentTolerance ||
+                                                  Math.abs((comparisonTarget.transformedShape.getX() + comparisonTarget.transformedShape.getWidth()) - consolidatedBounds.getX()) < alignmentTolerance);
+
+                    if (adjacentHorizontal) {
+                        double newMinX = Math.min(consolidatedBounds.getX(), comparisonTarget.transformedShape.getX());
+                        double newMaxX = Math.max(consolidatedBounds.getX() + consolidatedBounds.getWidth(), comparisonTarget.transformedShape.getX() + comparisonTarget.transformedShape.getWidth());
+                        
+                        consolidatedBounds.x = newMinX;
+                        consolidatedBounds.width = newMaxX - newMinX;
+                        mergedFlags[j] = true; // Flag instance as absorbed
+                    }
+                }
+                fusedZones.add(consolidatedBounds);
+            }
+
+            // Populate master black list map with consolidated structural boundaries
+            bannedCoordinateZones.addAll(fusedZones);
         }
     }
 
@@ -253,7 +316,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: RAW VECTORS EXTRACTOR
+     * SCRIPT 1: SUB-STREAM ENGINE
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
