@@ -20,6 +20,8 @@ import java.util.Map;
 
 public class VectorRecolor {
 
+    private static final boolean DEBUG_MODE = true;
+
     public static void main(String[] args) {
         File inputDir = new File("pdfs");
         File outputDir = new File("output_artifacts");
@@ -63,8 +65,10 @@ public class VectorRecolor {
                             int paintCount = 0;
                             for (Rectangle2D cleanLine : linesToKeep) {
                                 paintCount++;
-                                System.out.println(String.format("  [RENDER-EXEC] Drawing Green Shape #%d -> X=%.3f, Y=%.3f, W=%.3f, H=%.3f", 
-                                        paintCount, cleanLine.getX(), cleanLine.getY(), cleanLine.getWidth(), cleanLine.getHeight()));
+                                if (DEBUG_MODE) {
+                                    System.out.println(String.format("  [RENDER-EXEC] Drawing Green Shape #%d -> X=%.3f, Y=%.3f, W=%.3f, H=%.3f", 
+                                            paintCount, cleanLine.getX(), cleanLine.getY(), cleanLine.getWidth(), cleanLine.getHeight()));
+                                }
                                 
                                 outputStream.addRect(
                                     (float) cleanLine.getX(), 
@@ -90,7 +94,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 2: DEEP-TELEMETRY MATRIX ANALYST
+     * SCRIPT 2: UNCONSTRAINED REFERENCE ANALYST (NO GATES)
      */
     private static class Script2Analyst {
         private final PDPage page;
@@ -102,7 +106,6 @@ public class VectorRecolor {
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
-            System.out.println("  [ANALYST-START] Bootstrapping Engine Subroutines...");
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
@@ -111,38 +114,41 @@ public class VectorRecolor {
             
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
+            
+            // The exclusion registry tracks EVERY single vector reference found on the page
             Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
 
-            System.out.println("  [FILTER-PASS 1] Sorting elements by target size rules (W > 2.0 && H > 4.0)...");
-            int rawIdx = 0;
+            // ==========================================================================
+            // STEP 1: UNIFIED INITIAL REGISTRATION
+            // Every vector path is marked safe ('false') by default. No sizing gates.
+            // ==========================================================================
             for (Rectangle2D shape : rawScoutedVectors) {
-                rawIdx++;
-                if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
-                    System.out.println(String.format("    -> Raw Element #%d [UPGRADED TO AUDIT BOX]: X=%.3f, Y=%.3f, W=%.3f, H=%.3f", 
-                            rawIdx, shape.getX(), shape.getY(), shape.getWidth(), shape.getHeight()));
-                    targetBoxesToAudit.add(new VisualBox(shape, shape));
-                } else {
-                    System.out.println(String.format("    -> Raw Element #%d [FALLBACK PATH]: X=%.3f, Y=%.3f, W=%.3f, H=%.3f (Fails size bounds, marked KEEP by default)", 
-                            rawIdx, shape.getX(), shape.getY(), shape.getWidth(), shape.getHeight()));
-                    exclusionRegistry.put(shape, false);
+                exclusionRegistry.put(shape, false); 
+
+                // Size metrics are used strictly to protect the PDFTextStripper boundary space,
+                // NEVER to keep a path segment from being swept up and dropped later.
+                if (shape.getWidth() > 2.0 && shape.getHeight() > 2.0) {
+                    targetBoxesToAudit.add(new VisualBox(shape, shape)); 
                 }
             }
 
+            // ==========================================================================
+            // STEP 2: ARTIFACT MATRIX PATTERN EVALUATION
+            // ==========================================================================
             if (!targetBoxesToAudit.isEmpty()) {
-                System.out.println(String.format("  [TEXT-STRIPPER] Injecting %d spatial regions for OCR evaluation...", targetBoxesToAudit.size()));
                 PDFTextStripperByArea stripper = new PDFTextStripperByArea();
                 stripper.setSortByPosition(true);
 
                 for (int b = 0; b < targetBoxesToAudit.size(); b++) {
                     Rectangle2D rawBounds = targetBoxesToAudit.get(b).transformedShape;
                     float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
+                    
                     stripper.addRegion("reg_" + b, new Rectangle2D.Float(
-                            (float)rawBounds.getX() + 1.0f, awtY + 1.0f, (float)rawBounds.getWidth() - 2.0f, (float)rawBounds.getHeight() - 2.0f));
+                            (float)rawBounds.getX() + 0.5f, awtY + 0.5f, (float)rawBounds.getWidth() - 1.0f, (float)rawBounds.getHeight() - 1.0f));
                 }
 
                 stripper.extractRegions(page);
 
-                System.out.println("  [CONTENT-VALIDATION] Processing textual results and column patterns...");
                 for (int b = 0; b < targetBoxesToAudit.size(); b++) {
                     VisualBox box = targetBoxesToAudit.get(b);
                     String extractedText = stripper.getTextForRegion("reg_" + b).trim();
@@ -150,33 +156,60 @@ public class VectorRecolor {
                     boolean textIsEmpty = extractedText.isEmpty();
                     boolean isStructuralGapColumn = (box.transformedShape.getWidth() > 3.0 && box.transformedShape.getWidth() < 22.0);
 
-                    System.out.println(String.format("    -> Audit Box #%d [X=%.1f, Y=%.1f] Text Content: '%s' | isEmpty=%b | isGapCol=%b", 
-                            b, box.transformedShape.getX(), box.transformedShape.getY(), extractedText, textIsEmpty, isStructuralGapColumn));
-
                     if (textIsEmpty || isStructuralGapColumn) {
                         box.isEmptyArea = true;
                     }
                 }
 
-                System.out.println("  [FILTER-PASS 2] Processing neighbor-proximity matrices...");
+                // If a container matches an artifact grid pattern, its registry reference switches to TRUE (EXCLUDE)
                 filterSnapshotObjects(targetBoxesToAudit, exclusionRegistry);
             }
 
-            System.out.println("  [LOOKBACK-RESOLVER] Compiling final snapshot using instance reference validation checking...");
-            int evaluationCounter = 0;
+            // ==========================================================================
+            // STEP 3: HIGH-PRECISION LOOKBACK INTERCEPTOR
+            // Catch lines of ANY scale or rotation that snap horizontally to a dropped box area.
+            // ==========================================================================
+            float spatialSnappingTolerance = 3.0f; 
+
             for (Rectangle2D originalVector : rawScoutedVectors) {
-                evaluationCounter++;
                 Boolean isMarkedForExclusion = exclusionRegistry.get(originalVector);
                 
-                System.out.print(String.format("    -> Reference Check #%d [X=%.3f, Y=%.3f]: MapValue=%s ", 
-                        evaluationCounter, originalVector.getX(), originalVector.getY(), isMarkedForExclusion));
-
+                // Primary check: Drop immediately if the map registered an explicit instance removal
                 if (isMarkedForExclusion != null && isMarkedForExclusion) {
-                    System.out.println("==> [CRITICAL DROP] Found match in exclusion register! Skipping green drawing.");
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("    -> [PRIMARY DROP SUCCESS] Excluded flagged container instance at X=%.3f, Y=%.3f", 
+                                originalVector.getX(), originalVector.getY()));
+                    }
                     continue; 
                 }
-                
-                System.out.println("==> [PASS] Safe vector. Appending to keep-list.");
+
+                // Secondary Deep Spatial Check: Check if this path matches coordinates of a dropped container
+                boolean matchesBannedCoordinates = false;
+                for (VisualBox auditedBox : targetBoxesToAudit) {
+                    if (auditedBox.isArtifactLine) { 
+                        
+                        // Check if the lines align horizontally on the layout grid
+                        boolean sameXColumn = Math.abs(originalVector.getX() - auditedBox.transformedShape.getX()) < spatialSnappingTolerance;
+                        
+                        // Check if the line falls inside or right on the vertical span perimeter of that cell
+                        boolean insideVerticalSpan = originalVector.getY() >= auditedBox.transformedShape.getY() - spatialSnappingTolerance &&
+                                                     originalVector.getY() <= (auditedBox.transformedShape.getY() + auditedBox.transformedShape.getHeight() + spatialSnappingTolerance);
+
+                        if (sameXColumn && insideVerticalSpan) {
+                            matchesBannedCoordinates = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (matchesBannedCoordinates) {
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("    -> [RENDER BLOCK] Blocked stray border/fragment line at X=%.3f, Y=%.3f (H=%.3f)", 
+                                originalVector.getX(), originalVector.getY(), originalVector.getHeight()));
+                    }
+                    continue; // Skip appending to green line pass completely!
+                }
+
                 approvedKeepList.add(originalVector);
             }
 
@@ -193,74 +226,46 @@ public class VectorRecolor {
 
             for (int i = 0; i < boxes.size(); i++) {
                 VisualBox target = boxes.get(i);
-                System.out.println(String.format("    [MATRIX-EVAL] Inspecting Target Box #%d [X=%.1f, Y=%.1f, W=%.1f, H=%.1f, isEmptyArea=%b]", 
-                        i, target.transformedShape.getX(), target.transformedShape.getY(), target.transformedShape.getWidth(), target.transformedShape.getHeight(), target.isEmptyArea));
-                
-                if (!target.isEmptyArea) {
-                    System.out.println("      -> Box is not an empty area. Skipping neighbor check. Registered: KEEP.");
-                    exclusionRegistry.put(target.rawSourceLineReference, false);
-                    continue;
-                }
+                if (!target.isEmptyArea) continue;
 
                 boolean immediateRowRepeat = false;
                 boolean immediateColRepeat = false;
 
-                // Horizontal Row Evaluation
-                for (int n = 0; n < boxes.size(); n++) {
-                    VisualBox neighbor = boxes.get(n);
+                for (VisualBox neighbor : boxes) {
                     if (target == neighbor) continue;
-                    
                     boolean onSameRow = Math.abs(target.transformedShape.getY() - neighbor.transformedShape.getY()) < alignmentTolerance;
                     boolean matchHeight = Math.abs(target.transformedShape.getHeight() - neighbor.transformedShape.getHeight()) < sizeMatchTolerance;
                     
                     if (onSameRow && matchHeight) {
                         double distanceLeft = target.transformedShape.getX() - (neighbor.transformedShape.getX() + neighbor.transformedShape.getWidth());
                         double distanceRight = neighbor.transformedShape.getX() - (target.transformedShape.getX() + target.transformedShape.getWidth());
-                        
-                        boolean leftGapMatch = (distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit);
-                        boolean rightGapMatch = (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit);
-                        
-                        if (leftGapMatch || rightGapMatch) {
-                            System.out.println(String.format("      -> [ROW MATCH] Target #%d linked with Box #%d (DistLeft=%.2f, DistRight=%.2f)", i, n, distanceLeft, distanceRight));
+                        if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
+                            (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
                             immediateRowRepeat = true;
                             break; 
                         }
                     }
                 }
 
-                // Vertical Column Evaluation
-                for (int n = 0; n < boxes.size(); n++) {
-                    VisualBox neighbor = boxes.get(n);
+                for (VisualBox neighbor : boxes) {
                     if (target == neighbor) continue;
-                    
                     boolean onSameCol = Math.abs(target.transformedShape.getX() - neighbor.transformedShape.getX()) < alignmentTolerance;
                     boolean matchWidth = Math.abs(target.transformedShape.getWidth() - neighbor.transformedShape.getWidth()) < sizeMatchTolerance;
 
                     if (onSameCol && matchWidth) {
                         double distanceAbove = target.transformedShape.getY() - (neighbor.transformedShape.getY() + neighbor.transformedShape.getHeight());
                         double distanceBelow = neighbor.transformedShape.getY() - (target.transformedShape.getY() + target.transformedShape.getHeight());
-                        
-                        boolean aboveGapMatch = (distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit);
-                        boolean belowGapMatch = (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit);
-
-                        if (aboveGapMatch || belowGapMatch) {
-                            System.out.println(String.format("      -> [COL MATCH] Target #%d linked with Box #%d (DistAbove=%.2f, DistBelow=%.2f)", i, n, distanceAbove, distanceBelow));
+                        if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
+                            (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
                             immediateColRepeat = true;
                             break; 
                         }
                     }
                 }
 
-                // Final Classification Decision
-                boolean rowXorCol = (immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat);
-                System.out.println(String.format("      -> [DECISION] Target #%d RowRepeat=%b, ColRepeat=%b -> RowXorCol=%b", i, immediateRowRepeat, immediateColRepeat, rowXorCol));
-                
-                if (rowXorCol) {
-                    System.out.println(String.format("      ==> ARTIFACT VERIFIED. Flagging reference for REMOVAL at X=%.1f, Y=%.1f", target.transformedShape.getX(), target.transformedShape.getY()));
-                    exclusionRegistry.put(target.rawSourceLineReference, true);
-                } else {
-                    System.out.println("      ==> NOT AN ARTIFACT PATTERN. Registered: KEEP.");
-                    exclusionRegistry.put(target.rawSourceLineReference, false);
+                if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
+                    target.isArtifactLine = true; 
+                    exclusionRegistry.put(target.rawSourceLineReference, true); 
                 }
             }
         }
@@ -270,6 +275,7 @@ public class VectorRecolor {
         final Rectangle2D transformedShape;
         final Rectangle2D rawSourceLineReference;
         boolean isEmptyArea = false;
+        boolean isArtifactLine = false; 
         
         VisualBox(Rectangle2D transformed, Rectangle2D rawSource) { 
             this.transformedShape = transformed; 
@@ -283,16 +289,9 @@ public class VectorRecolor {
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
-        private int rawOperatorCounter = 0;
 
         protected DrawingBoxEngine(PDPage page) { super(page); }
         public List<Rectangle2D> getDetectedBoxes() { return detectedBoxes; }
-
-        private void logOperator(String op, double x, double y) {
-            rawOperatorCounter++;
-            // Un-comment the line below if you want to inspect every single vector node point on the canvas
-            // System.out.println(String.format("    [STREAM-OP #%d] %s -> x=%.2f, y=%.2f", rawOperatorCounter, op, x, y));
-        }
 
         private void updateBounds(double x, double y) {
             if (minX == null) { minX = maxX = x; minY = maxY = y; } 
@@ -309,14 +308,13 @@ public class VectorRecolor {
 
         @Override
         public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3) throws IOException {
-            logOperator("appendRectangle", p0.getX(), p0.getY());
             updateBounds(p0.getX(), p0.getY()); 
             updateBounds(p2.getX(), p2.getY()); 
         }
         
-        @Override public void moveTo(float x, float y) throws IOException { logOperator("moveTo", x, y); updateBounds(x, y); }
-        @Override public void lineTo(float x, float y) throws IOException { logOperator("lineTo", x, y); updateBounds(x, y); }
-        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException { logOperator("curveTo", x3, y3); updateBounds(x1, y1); updateBounds(x3, y3); }
+        @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException { updateBounds(x1, y1); updateBounds(x3, y3); }
         @Override public void strokePath() throws IOException { flushPath(); }
         @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
         @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
