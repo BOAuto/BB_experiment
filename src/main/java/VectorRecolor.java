@@ -41,54 +41,70 @@ public class VectorRecolor {
             System.out.println("PIPELINE START: " + inputFile.getName());
             System.out.println("==========================================================================");
 
-            try (PDDocument document = Loader.loadPDF(inputFile)) {
-                int totalPages = document.getNumberOfPages();
+            // Container to pass our clean, filtered dimensions across isolated document instances
+            List<List<Rectangle2D>> documentLevelKeepList = new ArrayList<>();
+
+            // ==========================================================================
+            // PHASE 1: COMPLETELY ISOLATED TRACKING (DOCUMENT INSTANCE 1)
+            // This instance is used purely for calculation and is immediately discarded.
+            // ==========================================================================
+            try (PDDocument scoutDocument = Loader.loadPDF(inputFile)) {
+                int totalPages = scoutDocument.getNumberOfPages();
 
                 for (int i = 0; i < totalPages; i++) {
-                    PDPage page = document.getPage(i);
-                    System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
-
-                    // ==========================================================
-                    // PASS 1: TOTALLY ISOLATED MEMORY CALCULATIONS
-                    // ==========================================================
-                    if (DEBUG_MODE) System.out.println("[PIPELINE] Running Script 2 Filtration in Complete Isolation...");
-                    Script2Analyst analyst = new Script2Analyst(page);
+                    PDPage scoutPage = scoutDocument.getPage(i);
+                    if (DEBUG_MODE) System.out.println(String.format("[SCOUT] Analyzing Page %d in complete isolation...", i + 1));
                     
-                    // This internal method runs Script 1 (Scout) strictly in memory.
-                    // It finds 1,583 vectors, runs the audit matrix, removes the 20 lines,
-                    // and returns the clean list of 1,563 approved vectors.
+                    Script2Analyst analyst = new Script2Analyst(scoutPage);
                     List<Rectangle2D> approvedKeepList = analyst.generateApprovedSnapshot();
+                    
+                    // Save the 1,563 clean coordinates safely outside this document's scope
+                    documentLevelKeepList.add(approvedKeepList);
+                }
+            } catch (IOException e) {
+                System.err.println("[PIPELINE FATAL] Isolated Scout failed: " + e.getMessage());
+                continue;
+            }
 
-                    // ==========================================================
-                    // PASS 2: THE ONLY PRODUCTION DRAW EXECUTION
-                    // ==========================================================
-                    if (!approvedKeepList.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[PIPELINE] Drawing Approved Memory Snapshot onto Page Layer...");
+            // ==========================================================================
+            // PHASE 2: PRODUCTION TARGET WRITER (DOCUMENT INSTANCE 2)
+            // A fresh load where no graphics engines or token iterations have touched the state.
+            // ==========================================================================
+            try (PDDocument targetDocument = Loader.loadPDF(inputFile)) {
+                int totalPages = targetDocument.getNumberOfPages();
+
+                for (int i = 0; i < totalPages; i++) {
+                    PDPage targetPage = targetDocument.getPage(i);
+                    List<Rectangle2D> approvedKeepList = documentLevelKeepList.get(i);
+
+                    if (approvedKeepList != null && !approvedKeepList.isEmpty()) {
+                        if (DEBUG_MODE) {
+                            System.out.println(String.format("[WRITE] Drawing exactly %d approved lines onto fresh Page %d...", 
+                                    approvedKeepList.size(), i + 1));
+                        }
                         
-                        // We open a single content stream to commit our visual state change
+                        // Open the visual stream for the *first and only* time in this runtime scope
                         try (PDPageContentStream outputStream = new PDPageContentStream(
-                                document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+                                targetDocument, targetPage, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
 
-                            // Paint ONLY the 1,563 approved paths
                             for (Rectangle2D drawingTarget : approvedKeepList) {
                                 outputStream.addRect((float) drawingTarget.getX(), (float) drawingTarget.getY(), 
                                                      (float) drawingTarget.getWidth(), (float) drawingTarget.getHeight());
                                 outputStream.stroke();
                             }
                         }
-                        if (DEBUG_MODE) System.out.println("  -> Safe Single-Snapshot Pass successful for current page.");
                     }
                 }
 
-                System.out.println("\n[FINALIZE] Committing memory allocations to disk...");
-                document.save(outputFile);
-                System.out.println("SUCCESS: Processed file committed and saved at: " + outputFile.getAbsolutePath());
+                System.out.println("\n[FINALIZE] Committing fresh visual changes to disk...");
+                targetDocument.save(outputFile);
+                System.out.println("SUCCESS: File cleanly generated at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[PIPELINE FATAL] IO Operation failed: " + e.getMessage());
+                System.err.println("[PIPELINE FATAL] Production writer failed: " + e.getMessage());
             }
         }
     }
@@ -106,7 +122,6 @@ public class VectorRecolor {
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
-            // SCRIPT 1 IS ISOLATED HERE: Pure in-memory coordinate harvest
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
@@ -114,7 +129,6 @@ public class VectorRecolor {
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
-            // Isolate items via your original size guidelines
             for (Rectangle2D shape : rawScoutedVectors) {
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
                     targetBoxesToAudit.add(new VisualBox(shape));
@@ -154,7 +168,7 @@ public class VectorRecolor {
 
             if (DEBUG_MODE) {
                 int elementsDropped = rawScoutedVectors.size() - approvedKeepList.size();
-                System.out.println(String.format("  -> [Snapshot Metric Verification] Pre-Filter: %d | Post-Filter Keep-List: %d | Omitted/Skipped: %d", 
+                System.out.println(String.format("  -> [Snapshot Metrics] Discovered: %d | Approved: %d | Omitted: %d", 
                         rawScoutedVectors.size(), approvedKeepList.size(), elementsDropped));
             }
 
@@ -214,16 +228,12 @@ public class VectorRecolor {
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
                     skipCount++;
                     if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [REMOVAL CONFIRMED] Dropping targeted structural line from keep-list at X=%.1f, Y=%.1f", 
+                        System.out.println(String.format("    -> [FILTER TARGET] Correctly dropping artifact line at X=%.1f, Y=%.1f", 
                                 target.originalShape.getX(), target.originalShape.getY()));
                     }
                 } else {
                     approvedKeepList.add(target.originalShape);
                 }
-            }
-            
-            if (DEBUG_MODE) {
-                System.out.println(String.format("  -> [Filter Outcome] Successfully omitted %d lines from the drawing layer.", skipCount));
             }
         }
     }
