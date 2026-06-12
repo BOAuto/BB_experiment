@@ -14,9 +14,7 @@ import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 
 public class VectorRecolor {
 
@@ -37,10 +35,10 @@ public class VectorRecolor {
         }
 
         for (File inputFile : files) {
-            File outputFile = new File(outputDir, "box_stitched_" + inputFile.getName());
+            File outputFile = new File(outputDir, "multi_stitched_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("ELEGANT BOX-STITCHING COMPILER ACTIVE: " + inputFile.getName());
+            System.out.println("MULTI-PASS STITCHING INTERCEPTOR ACTIVE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -48,7 +46,7 @@ public class VectorRecolor {
 
                 for (int i = 0; i < totalPages; i++) {
                     PDPage page = document.getPage(i);
-                    System.out.println(String.format("\n>>> COMPILED ANALYSIS FOR PAGE %d <<<", i + 1));
+                    System.out.println(String.format("\n>>> COMPILED MULTI-PASS ANALYSIS FOR PAGE %d <<<", i + 1));
 
                     // STAGE 1: Process structures natively as distinct lines or layout containers
                     LayoutCompiler compiler = new LayoutCompiler(page);
@@ -57,7 +55,7 @@ public class VectorRecolor {
                     List<Rectangle2D> finalCleanBoxes = compiler.getFinalLayoutBoxes();
                     List<Rectangle2D> finalCleanLines = compiler.getFinalLayoutLines();
 
-                    // STAGE 2: Render Phase (Keeps Object Count Natively Minimal)
+                    // STAGE 2: Render Phase
                     System.out.println("[STAGE 2] Rendering stitched boxes and structural standalone lines...");
                     try (PDPageContentStream outputStream = new PDPageContentStream(
                             document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
@@ -95,7 +93,7 @@ public class VectorRecolor {
     }
 
     /**
-     * NATIVE BOX-STITCHING LAYOUT ENGINE
+     * MULTI-PASS CONTAINER LAYOUT ENGINE
      */
     private static class LayoutCompiler {
         private final PDPage page;
@@ -149,7 +147,7 @@ public class VectorRecolor {
                 cell.isEmpty = stripper.getTextForRegion("c_" + c).trim().isEmpty();
             }
 
-            // Map Flow & Pair Adjacency using zero-gap tolerances
+            // Map Flow & Pair Adjacency using strict zero-gap tolerances
             float alignmentTolerance = 1.0f;
             float sizeMatchTolerance = 1.0f;
 
@@ -170,9 +168,7 @@ public class VectorRecolor {
                         
                         if (Math.abs(distLeft) < 0.5f || Math.abs(distRight) < 0.5f) {
                             horizontalMatch = true;
-                            // Track valid data cells to stretch into us
                             if (!neighbor.isEmpty) {
-                                // Prefer the data cell to our left if flow goes left-to-right
                                 if (neighbor.bounds.getX() < current.bounds.getX()) {
                                     targetPartner = neighbor;
                                 } else if (targetPartner == null) {
@@ -192,7 +188,6 @@ public class VectorRecolor {
                         if (Math.abs(distAbove) < 0.5f || Math.abs(distBelow) < 0.5f) {
                             verticalMatch = true;
                             if (!neighbor.isEmpty) {
-                                // Prefer the data cell directly above us
                                 if (neighbor.bounds.getY() > current.bounds.getY()) {
                                     targetPartner = neighbor;
                                 } else if (targetPartner == null) {
@@ -203,7 +198,7 @@ public class VectorRecolor {
                     }
                 }
 
-                // Strictly enforce structural flow types
+                // Strictly enforce asymmetric structural flow types
                 if (horizontalMatch && !verticalMatch) current.flow = TableFlow.LEFT_TO_RIGHT;
                 else if (verticalMatch && !horizontalMatch) current.flow = TableFlow.TOP_TO_BOTTOM;
                 else if (horizontalMatch && verticalMatch) current.flow = TableFlow.BIDIRECTIONAL;
@@ -212,19 +207,13 @@ public class VectorRecolor {
                 current.adjacentDataCell = targetPartner;
             }
 
-            // STITCH COMPILING OVERRIDES
-            Map<VisualCell, Boolean> processedRegistry = new IdentityHashMap<>();
+            // STITCH COMPILING (Processes every single stacked occurrence)
             for (VisualCell cell : tableCellsRegistry) {
-                processedRegistry.put(cell, false);
-            }
-
-            for (VisualCell cell : tableCellsRegistry) {
-                if (processedRegistry.get(cell)) continue;
-
                 if (!cell.isEmpty) {
-                    // Valid cell: Keep it natively as a container box shape
-                    outputCleanBoxes.add(cell.bounds);
-                    processedRegistry.put(cell, true);
+                    // Valid data cell: Retain the shape bounds natively
+                    if (!outputCleanBoxes.contains(cell.bounds)) {
+                        outputCleanBoxes.add(cell.bounds);
+                    }
                     continue;
                 }
 
@@ -242,17 +231,14 @@ public class VectorRecolor {
                                         dataCell.bounds.getX(), cell.bounds.getWidth()));
                             }
                             
-                            // Stretch Valid Box's width to seamlessly encompass the empty box footprint
                             double newX = Math.min(dataCell.bounds.getX(), cell.bounds.getX());
                             double newWidth = dataCell.bounds.getWidth() + cell.bounds.getWidth();
                             dataCell.bounds.setRect(newX, dataCell.bounds.getY(), newWidth, dataCell.bounds.getHeight());
                             
-                            // Prevent duplicate processing of the data cell since it's now updated in place
                             if (!outputCleanBoxes.contains(dataCell.bounds)) {
                                 outputCleanBoxes.add(dataCell.bounds);
                             }
                         }
-                        processedRegistry.put(cell, true); // Erases the empty box natively by not adding it to output
                         break;
 
                     case TOP_TO_BOTTOM:
@@ -263,7 +249,6 @@ public class VectorRecolor {
                                         dataCell.bounds.getY(), cell.bounds.getHeight()));
                             }
 
-                            // Stretch Valid Box's height to seamlessly encompass the empty box footprint
                             double newY = Math.min(dataCell.bounds.getY(), cell.bounds.getY());
                             double newHeight = dataCell.bounds.getHeight() + cell.bounds.getHeight();
                             dataCell.bounds.setRect(dataCell.bounds.getX(), newY, dataCell.bounds.getWidth(), newHeight);
@@ -272,23 +257,22 @@ public class VectorRecolor {
                                 outputCleanBoxes.add(dataCell.bounds);
                             }
                         }
-                        processedRegistry.put(cell, true); // Erases the empty box natively by not adding it to output
                         break;
 
                     case BIDIRECTIONAL:
                         if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Bidirectional Flow: Preserving box footprint.");
-                        outputCleanBoxes.add(cell.bounds);
-                        processedRegistry.put(cell, true);
+                        if (!outputCleanBoxes.contains(cell.bounds)) {
+                            outputCleanBoxes.add(cell.bounds);
+                        }
                         break;
 
                     case NOT_A_TABLE:
                         if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Isolated Non-Table Artifact: Deleting box footprint entirely.");
-                        processedRegistry.put(cell, true); // Drops box entirely
+                        // Drops box entirely by skipping addition to output list
                         break;
                 }
             }
 
-            // Route any decoupled pure lines safely to the final rendering pipeline
             outputCleanLines.addAll(pureStandaloneLines);
         }
     }
