@@ -50,12 +50,12 @@ public class VectorRecolor {
                     System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
 
                     // ==========================================================
-                    // STEP 1 & 2: SCRIPT 2 RUNS INTERNALLY (SCOUTS & ANALYZES)
+                    // STEP 1 & 2: SCRIPT 2 RUNS INTERNALLY (SCOUTS & ANALYZES ALL)
                     // ==========================================================
                     if (DEBUG_MODE) System.out.println("[PIPELINE] Initializing Script 2 Analysis Engine...");
                     Script2Analyst analyst = new Script2Analyst(page);
                     
-                    // This internally triggers Script 1 tracking, performs text stripping, and filters
+                    // Gathers, audits, and filters every vector down to the clean array
                     List<Rectangle2D> approvedKeepList = analyst.generateApprovedSnapshot();
 
                     // ==========================================================
@@ -105,23 +105,19 @@ public class VectorRecolor {
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
-            // Internal execution of Script 1 to gather coordinates
             if (DEBUG_MODE) System.out.println("  -> [Script 2 Internal] Spawning DrawingBoxEngine to scout coordinates...");
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
-            if (DEBUG_MODE) System.out.println(String.format("  -> [Script 2 Internal] Scout gathered %d vectors. Running text analysis...", rawScoutedVectors.size()));
+            if (DEBUG_MODE) System.out.println(String.format("  -> [Script 2 Internal] Scout gathered %d vectors. Running rigorous text analysis...", rawScoutedVectors.size()));
 
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
+            // CRITICAL FIX: Direct ALL elements to audit. No shortcuts or size filters.
             for (Rectangle2D shape : rawScoutedVectors) {
-                if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
-                    targetBoxesToAudit.add(new VisualBox(shape));
-                } else {
-                    approvedKeepList.add(shape); // Preserve tiny fragments safely
-                }
+                targetBoxesToAudit.add(new VisualBox(shape));
             }
 
             if (!targetBoxesToAudit.isEmpty()) {
@@ -131,8 +127,13 @@ public class VectorRecolor {
                 for (int b = 0; b < targetBoxesToAudit.size(); b++) {
                     Rectangle2D rawBounds = targetBoxesToAudit.get(b).originalShape;
                     float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
+                    
+                    // CRITICAL FIX: Ensure hair-thin/zero metrics have a valid physical area to capture text
+                    float regionW = Math.max((float)rawBounds.getWidth(), 2.0f);
+                    float regionH = Math.max((float)rawBounds.getHeight(), 2.0f);
+                    
                     stripper.addRegion("reg_" + b, new Rectangle2D.Float(
-                            (float)rawBounds.getX() + 1.0f, awtY + 1.0f, (float)rawBounds.getWidth() - 2.0f, (float)rawBounds.getHeight() - 2.0f));
+                            (float)rawBounds.getX(), awtY, regionW, regionH));
                 }
 
                 stripper.extractRegions(page);
@@ -142,14 +143,15 @@ public class VectorRecolor {
                     String extractedText = stripper.getTextForRegion("reg_" + b).trim();
                     
                     boolean textIsEmpty = extractedText.isEmpty();
-                    boolean isStructuralGapColumn = (box.originalShape.getWidth() > 3.0 && box.originalShape.getWidth() < 22.0);
+                    // Calibrated column width tolerances specifically targeting table border anomalies
+                    boolean isStructuralGapColumn = (box.originalShape.getWidth() > 1.0 && box.originalShape.getWidth() < 25.0);
 
                     if (textIsEmpty || isStructuralGapColumn) {
                         box.isEmptyArea = true;
                     }
                 }
 
-                // Filter snapshot items based on structural alignments
+                // Filter everything through the geometry calculation engine
                 filterSnapshotObjects(targetBoxesToAudit, approvedKeepList);
             }
 
@@ -163,7 +165,6 @@ public class VectorRecolor {
         }
 
         private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
-            // Broadened tolerances to handle micro-measurement grid offsets and variations safely
             float alignmentTolerance = 12.0f;  
             float sizeMatchTolerance = 5.0f;   
             float gapSearchLimit = 35.0f;      
@@ -215,8 +216,8 @@ public class VectorRecolor {
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
                     skipCount++;
-                    if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [SKIPPED BY AUDIT] Removing grid artifact line at X=%.1f, Y=%.1f", 
+                    if (DEBUG_MODE && skipCount <= 20) {
+                        System.out.println(String.format("    -> [SKIPPED BY AUDIT] Confirmed Grid Artifact Line Skipped at X=%.1f, Y=%.1f", 
                                 target.originalShape.getX(), target.originalShape.getY()));
                     }
                 } else {
@@ -225,7 +226,7 @@ public class VectorRecolor {
             }
             
             if (DEBUG_MODE) {
-                System.out.println(String.format("  -> [Filter Outcome] Script 2 flagged %d lines to be completely skipped from final drawing.", skipCount));
+                System.out.println(String.format("  -> [Filter Outcome] Script 2 successfully filtered and omitted %d structural lines.", skipCount));
             }
         }
     }
