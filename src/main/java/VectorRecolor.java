@@ -55,67 +55,38 @@ public class VectorRecolor {
                     // ==========================================================================
                     if (DEBUG_MODE) System.out.println("[PIPELINE] Running Isolated Spatial Analysis Engine...");
                     Script2Analyst analyst = new Script2Analyst(page);
-                    analyst.executeAnalysisPipeline();
                     
-                    List<Rectangle2D> linesToKill = analyst.getBlacklistLinesToKill();
-                    List<Rectangle2D> linesToKeep = analyst.getApprovedKeepList();
+                    // This now strictly contains ONLY the 1,563 approved paths
+                    List<Rectangle2D> linesToKeep = analyst.generateApprovedSnapshot();
 
                     // ==========================================================================
-                    // STEP 2: UNIFIED VISUAL EXECUTION PASS
-                    // We open a single content stream to perform the erasure and the draw pass.
+                    // STEP 2: RECOLOR PLOT PASS
+                    // Draws ONLY the approved lines in green. No modifications to original lines.
                     // ==========================================================================
-                    if (!linesToKill.isEmpty() || !linesToKeep.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[PIPELINE] Opening graphics stream layer for unified updates...");
+                    if (!linesToKeep.isEmpty()) {
+                        if (DEBUG_MODE) System.out.println(String.format("[PIPELINE] Drawing exactly %d approved snapshot paths in green...", linesToKeep.size()));
                         
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
-                            // ------------------------------------------------------------------
-                            // SUB-STEP A: THE WHITE-OUT ERASER
-                            // Active white masking shields the original background artifacts from view
-                            // ------------------------------------------------------------------
-                            if (!linesToKill.isEmpty()) {
-                                if (DEBUG_MODE) System.out.println(String.format("  -> Masking out %d artifact zones with opaque white fill...", linesToKill.size()));
-                                outputStream.setNonStrokingColor(Color.WHITE);
-                                
-                                for (Rectangle2D badLine : linesToKill) {
-                                    // Apply a microscopic padding boundary (0.5 point) to prevent anti-aliasing color bleed
-                                    float padding = 0.5f;
-                                    outputStream.addRect(
-                                        (float) badLine.getX() - padding, 
-                                        (float) badLine.getY() - padding, 
-                                        (float) badLine.getWidth() + (padding * 2), 
-                                        (float) badLine.getHeight() + (padding * 2)
-                                    );
-                                    outputStream.fill(); // Solid fill commits the white mask over the old coordinates
-                                }
-                            }
+                            outputStream.setStrokingColor(Color.GREEN);
+                            outputStream.setLineWidth(1.0f);
 
-                            // ------------------------------------------------------------------
-                            // SUB-STEP B: TARGETED RECOLOR PLOT
-                            // Draws our 1,563 approved vector locations cleanly in green right on top
-                            // ------------------------------------------------------------------
-                            if (!linesToKeep.isEmpty()) {
-                                if (DEBUG_MODE) System.out.println(String.format("  -> Drawing %d approved snapshot paths in green...", linesToKeep.size()));
-                                outputStream.setStrokingColor(Color.GREEN);
-                                outputStream.setLineWidth(1.0f);
-
-                                for (Rectangle2D cleanLine : linesToKeep) {
-                                    outputStream.addRect(
-                                        (float) cleanLine.getX(), 
-                                        (float) cleanLine.getY(), 
-                                        (float) cleanLine.getWidth(), 
-                                        (float) cleanLine.getHeight()
-                                    );
-                                    outputStream.stroke();
-                                }
+                            for (Rectangle2D cleanLine : linesToKeep) {
+                                outputStream.addRect(
+                                    (float) cleanLine.getX(), 
+                                    (float) cleanLine.getY(), 
+                                    (float) cleanLine.getWidth(), 
+                                    (float) cleanLine.getHeight()
+                                );
+                                outputStream.stroke();
                             }
                         }
-                        if (DEBUG_MODE) System.out.println("  -> Unified White-Out and Drawing Pass committed successfully.");
+                        if (DEBUG_MODE) System.out.println("  -> Green Graphic Snapshot layer committed successfully.");
                     }
                 }
 
-                System.out.println("\n[FINALIZE] Committing memory state alterations to storage...");
+                System.out.println("\n[FINALIZE] Saving snapshot document to disk...");
                 document.save(outputFile);
                 System.out.println("SUCCESS: Cleaned snapshot document compiled at: " + outputFile.getAbsolutePath());
 
@@ -131,26 +102,22 @@ public class VectorRecolor {
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
-        private final List<Rectangle2D> approvedKeepList = new ArrayList<>();
-        private final List<Rectangle2D> blacklistLinesToKill = new ArrayList<>();
 
         public Script2Analyst(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
         }
 
-        public List<Rectangle2D> getApprovedKeepList() { return approvedKeepList; }
-        public List<Rectangle2D> getBlacklistLinesToKill() { return blacklistLinesToKill; }
-
-        public void executeAnalysisPipeline() throws IOException {
+        public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
             // Run Script 1 internally strictly to harvest coordinate references in memory
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
+            List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
-            // Map and categorize by size dimensions matching your custom structural table fields
+            // Separate complex cell structures from simple lines
             for (Rectangle2D shape : rawScoutedVectors) {
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
                     targetBoxesToAudit.add(new VisualBox(shape));
@@ -185,27 +152,25 @@ public class VectorRecolor {
                     }
                 }
 
-                filterSnapshotObjects(targetBoxesToAudit);
+                filterSnapshotObjects(targetBoxesToAudit, approvedKeepList);
             }
 
             if (DEBUG_MODE) {
-                System.out.println(String.format("  -> [Metrics Evaluation] Scouted: %d | Approved (Keep): %d | Isolated (Kill): %d", 
-                        rawScoutedVectors.size(), approvedKeepList.size(), blacklistLinesToKill.size()));
+                System.out.println(String.format("  -> [Metrics Evaluation] Scouted: %d | Approved Green Lines: %d | Dropped From Green Pass: %d", 
+                        rawScoutedVectors.size(), approvedKeepList.size(), (rawScoutedVectors.size() - approvedKeepList.size())));
             }
+
+            return approvedKeepList;
         }
 
-        private void filterSnapshotObjects(List<VisualBox> boxes) {
+        private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
             float alignmentTolerance = 5.0f;  
             float sizeMatchTolerance = 2.0f;  
             float gapSearchLimit = 15.0f;     
 
-            for (int i = 0; i < boxes.size(); i++) {
-                VisualBox target = boxes.get(i);
-                
-                if (!target.isEmptyArea) {
-                    approvedKeepList.add(target.originalShape);
-                    continue;
-                }
+            // FIRST PASS: Identify which boxes are explicitly artifacts based on neighbor patterns
+            for (VisualBox target : boxes) {
+                if (!target.isEmptyArea) continue;
 
                 boolean immediateRowRepeat = false;
                 boolean immediateColRepeat = false;
@@ -243,13 +208,33 @@ public class VectorRecolor {
                 }
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
-                    blacklistLinesToKill.add(target.originalShape);
+                    target.isArtifactLine = true;
+                }
+            }
+
+            // SECOND PASS: Strict exclusion. If a coordinate overlaps or belongs to a flagged artifact line, 
+            // we do NOT add it to the green keep list.
+            for (VisualBox box : boxes) {
+                if (box.isArtifactLine) {
                     if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [CLASSIFIED ARTIFACT] Queued for erasure at X=%.1f, Y=%.1f", 
-                                target.originalShape.getX(), target.originalShape.getY()));
+                        System.out.println(String.format("    -> [EXCLUDED FROM GREEN PASS] Dropping line at X=%.1f, Y=%.1f", 
+                                box.originalShape.getX(), box.originalShape.getY()));
                     }
-                } else {
-                    approvedKeepList.add(target.originalShape);
+                    continue; // Skip completely!
+                }
+                
+                // Double check against already dropped coordinates to handle fragment overlaps
+                boolean crossContaminated = false;
+                for (VisualBox artifact : boxes) {
+                    if (artifact.isArtifactLine && Math.abs(box.originalShape.getX() - artifact.originalShape.getX()) < alignmentTolerance 
+                                                && Math.abs(box.originalShape.getY() - artifact.originalShape.getY()) < alignmentTolerance) {
+                        crossContaminated = true;
+                        break;
+                    }
+                }
+
+                if (!crossContaminated) {
+                    approvedKeepList.add(box.originalShape);
                 }
             }
         }
@@ -258,6 +243,7 @@ public class VectorRecolor {
     private static class VisualBox {
         Rectangle2D originalShape;
         boolean isEmptyArea = false;
+        boolean isArtifactLine = false; // Flag to enforce complete exclusion
         VisualBox(Rectangle2D shape) { this.originalShape = shape; }
     }
 
