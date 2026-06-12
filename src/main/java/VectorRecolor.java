@@ -117,7 +117,7 @@ public class VectorRecolor {
         }
     }
 
-    /**
+/**
      * Deep-scans the low-level content tokens of the original PDF page.
      * If a drawing path operator matches our memory-mapped removal segments, it gets deleted.
      */
@@ -162,8 +162,7 @@ public class VectorRecolor {
                     } else {
                         // Strip out the stroke/fill operator to kill the line, but append a safe path termination token
                         currentPathSubTokens.clear();
-                        PDFStreamParser endParser = new PDFStreamParser(new PDStream(doc));
-                        filteredTokens.add(Operator.getOperator("n")); // New path / No-op termination
+                        filteredTokens.add(Operator.getOperator("n")); // Safe No-op termination token
                     }
                     currentPathSubTokens.clear();
                     skipCurrentPathSegment = false;
