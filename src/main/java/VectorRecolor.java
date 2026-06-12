@@ -40,7 +40,7 @@ public class VectorRecolor {
             File outputFile = new File(outputDir, "stitched_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("STRUCTURAL STITCHING COMPILER ACTIVE: " + inputFile.getName());
+            System.out.println("STRICT STRUCTURAL STITCHING COMPILER ACTIVE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -50,7 +50,7 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n>>> COMPILED ANALYSIS FOR PAGE %d <<<", i + 1));
 
-                    // STAGE 1: Structural Analysis & Layout Flow Detection
+                    // STAGE 1: Structural Analysis & Strict Layout Flow Detection
                     LayoutCompiler compiler = new LayoutCompiler(page);
                     compiler.analyzeLayoutFlow();
                     
@@ -119,7 +119,7 @@ public class VectorRecolor {
                 if (vector.getWidth() > 2.0 && vector.getHeight() > 2.0) {
                     allCells.add(new VisualCell(vector));
                 } else {
-                    // Retain standalone pure line paths instantly
+                    // Standalone line: Directly route for processing/removal without stitching mechanics
                     stitchedLinesOutput.add(vector);
                 }
             }
@@ -142,42 +142,61 @@ public class VectorRecolor {
                 cell.isEmpty = stripper.getTextForRegion("c_" + c).trim().isEmpty();
             }
 
-            // Determine Layout Flows & Adjacency Matrix
-            float tolerance = 1.5f;
+            // ==========================================================================
+            // STRICT NEIGHBORHOOD ADJACENCY MATRIX (ZERO GAP)
+            // ==========================================================================
+            float alignmentTolerance = 1.0f;  // Strict axial baseline alignment tracking
+            float sizeMatchTolerance = 1.0f;  // Strict height/width layout matching
+
             for (VisualCell current : allCells) {
-                boolean rowRepeat = false;
-                boolean colRepeat = false;
+                boolean hasAdjacentHorizontalNeighbor = false;
+                boolean hasAdjacentVerticalNeighbor = false;
                 VisualCell neighborToStitch = null;
 
                 for (VisualCell neighbor : allCells) {
                     if (current == neighbor) continue;
 
-                    boolean sameRow = Math.abs(current.bounds.getY() - neighbor.bounds.getY()) < tolerance;
-                    boolean sameCol = Math.abs(current.bounds.getX() - neighbor.bounds.getX()) < tolerance;
-
-                    if (sameRow) {
-                        rowRepeat = true;
-                        // Track left-to-right neighbor adjacency for stitching extensions
-                        if (Math.abs((current.bounds.getX() + current.bounds.getWidth()) - neighbor.bounds.getX()) < 3.0f ||
-                            Math.abs((neighbor.bounds.getX() + neighbor.bounds.getWidth()) - current.bounds.getX()) < 3.0f) {
+                    // 1. HORIZONTAL ANALYSIS (Left-to-Right Flow Detection)
+                    boolean sameRow = Math.abs(current.bounds.getY() - neighbor.bounds.getY()) < alignmentTolerance;
+                    boolean matchHeight = Math.abs(current.bounds.getHeight() - neighbor.bounds.getHeight()) < sizeMatchTolerance;
+                    
+                    if (sameRow && matchHeight) {
+                        double distanceLeft = current.bounds.getX() - (neighbor.bounds.getX() + neighbor.bounds.getWidth());
+                        double distanceRight = neighbor.bounds.getX() - (current.bounds.getX() + current.bounds.getWidth());
+                        
+                        // FORCE ADJACENCY: Cells must touch directly with no whitespace gap
+                        if (Math.abs(distanceLeft) < 0.5f || Math.abs(distanceRight) < 0.5f) {
+                            hasAdjacentHorizontalNeighbor = true;
                             if (!neighbor.isEmpty) neighborToStitch = neighbor;
                         }
                     }
-                    if (sameCol) {
-                        colRepeat = true;
-                        // Track top-to-bottom neighbor adjacency for stitching extensions
-                        if (Math.abs((current.bounds.getY() + current.bounds.getHeight()) - neighbor.bounds.getY()) < 3.0f ||
-                            Math.abs((neighbor.bounds.getY() + neighbor.bounds.getHeight()) - current.bounds.getY()) < 3.0f) {
+
+                    // 2. VERTICAL ANALYSIS (Top-to-Bottom Flow Detection)
+                    boolean sameCol = Math.abs(current.bounds.getX() - neighbor.bounds.getX()) < alignmentTolerance;
+                    boolean matchWidth = Math.abs(current.bounds.getWidth() - neighbor.bounds.getWidth()) < sizeMatchTolerance;
+
+                    if (sameCol && matchWidth) {
+                        double distanceAbove = current.bounds.getY() - (neighbor.bounds.getY() + neighbor.bounds.getHeight());
+                        double distanceBelow = neighbor.bounds.getY() - (current.bounds.getY() + current.bounds.getHeight());
+                        
+                        // FORCE ADJACENCY: Cells must touch vertically with no whitespace gap
+                        if (Math.abs(distanceAbove) < 0.5f || Math.abs(distanceBelow) < 0.5f) {
+                            hasAdjacentVerticalNeighbor = true;
                             if (!neighbor.isEmpty) neighborToStitch = neighbor;
                         }
                     }
                 }
 
-                // Categorize Flow State Rules
-                if (rowRepeat && colRepeat)      current.flow = TableFlow.BIDIRECTIONAL;
-                else if (rowRepeat)              current.flow = TableFlow.LEFT_TO_RIGHT;
-                else if (colRepeat)              current.flow = TableFlow.TOP_TO_BOTTOM;
-                else                             current.flow = TableFlow.NOT_A_TABLE;
+                // Strictly evaluate asymmetric layout flow behavior
+                if (hasAdjacentHorizontalNeighbor && !hasAdjacentVerticalNeighbor) {
+                    current.flow = TableFlow.LEFT_TO_RIGHT;
+                } else if (hasAdjacentVerticalNeighbor && !hasAdjacentHorizontalNeighbor) {
+                    current.flow = TableFlow.TOP_TO_BOTTOM;
+                } else if (hasAdjacentHorizontalNeighbor && hasAdjacentVerticalNeighbor) {
+                    current.flow = TableFlow.BIDIRECTIONAL;
+                } else {
+                    current.flow = TableFlow.NOT_A_TABLE;
+                }
 
                 current.adjacentDataCell = neighborToStitch;
             }
@@ -185,7 +204,7 @@ public class VectorRecolor {
             // Process line extractions and layout stitching overrides
             for (VisualCell cell : allCells) {
                 if (!cell.isEmpty) {
-                    // Valid cell: Keep all 4 lines as standard structural grid lines
+                    // Valid data cell: Retain all boundaries safely
                     addBoxEdgesToList(cell.bounds);
                     continue;
                 }
@@ -195,16 +214,15 @@ public class VectorRecolor {
                             cell.bounds.getX(), cell.bounds.getY(), cell.flow));
                 }
 
-                // Apply targeted edge stripping and stitching mechanics based on Flow Type
                 switch (cell.flow) {
                     case LEFT_TO_RIGHT:
-                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Left-to-Right: Stripping LEFT edge. Preserving top, bottom, right.");
-                        // Strip Left: Send only top, bottom, and right to output list
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Left-to-Right Flow: Stripping LEFT edge. Preserving top, bottom, right.");
+                        // Strip Left line: Route top, bottom, right segments to stream
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY() + cell.bounds.getHeight(), cell.bounds.getWidth(), 0.75)); // Top
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), cell.bounds.getWidth(), 0.75)); // Bottom
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX() + cell.bounds.getWidth(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Right
 
-                        // STITCH EXTENSION: Extend neighboring valid table cell lines horizontally
+                        // STITCH MATRIX: Dynamically stretch adjacent valid cell width to absorb blank space
                         if (cell.adjacentDataCell != null) {
                             if (VERBOSE_LOG) {
                                 System.out.println(String.format("  -> [STITCH MACHINE] Extending neighboring valid table cell (X=%.3f) lines horizontally by Width: %.3f", 
@@ -220,13 +238,13 @@ public class VectorRecolor {
                         break;
 
                     case TOP_TO_BOTTOM:
-                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Top-to-Bottom: Stripping TOP edge. Preserving bottom, left, right.");
-                        // Strip Top: Send only bottom, left, and right to output list
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Top-to-Bottom Flow: Stripping TOP edge. Preserving bottom, left, right.");
+                        // Strip Top line: Route bottom, left, right segments to stream
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), cell.bounds.getWidth(), 0.75)); // Bottom
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Left
                         stitchedLinesOutput.add(new Rectangle2D.Double(cell.bounds.getX() + cell.bounds.getWidth(), cell.bounds.getY(), 0.75, cell.bounds.getHeight())); // Right
 
-                        // STITCH EXTENSION: Extend neighboring valid table cell lines vertically
+                        // STITCH MATRIX: Dynamically stretch adjacent valid cell height to absorb blank space
                         if (cell.adjacentDataCell != null) {
                             if (VERBOSE_LOG) {
                                 System.out.println(String.format("  -> [STITCH MACHINE] Extending neighboring valid table cell (Y=%.3f) lines vertically by Height: %.3f", 
@@ -242,13 +260,13 @@ public class VectorRecolor {
                         break;
 
                     case BIDIRECTIONAL:
-                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Bidirectional Flow: Protecting all lines. No removal executed.");
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Bidirectional Matrix Flow: Protecting all lines. No removal executed.");
                         addBoxEdgesToList(cell.bounds);
                         break;
 
                     case NOT_A_TABLE:
-                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Isolated Non-Table Artifact: Stripping ALL 4 lines for removal.");
-                        // Do not add any edge segments to stitchedLinesOutput, effectively erasing the object
+                        if (VERBOSE_LOG) System.out.println("  -> [RULE ACTION] Isolated Non-Table Artifact: Stripping ALL 4 lines for structural removal.");
+                        // Skips entire box conversion block, effectively erasing the decoupled vector path completely
                         break;
                 }
             }
@@ -276,7 +294,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: RAW VECTOR EXTRACTION ENGINE
+     * SCRIPT 1: RAW PATH PARSER
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
