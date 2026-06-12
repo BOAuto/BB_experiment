@@ -41,70 +41,86 @@ public class VectorRecolor {
             System.out.println("PIPELINE START: " + inputFile.getName());
             System.out.println("==========================================================================");
 
-            // Container to pass our clean, filtered dimensions across isolated document instances
-            List<List<Rectangle2D>> documentLevelKeepList = new ArrayList<>();
-
-            // ==========================================================================
-            // PHASE 1: COMPLETELY ISOLATED TRACKING (DOCUMENT INSTANCE 1)
-            // This instance is used purely for calculation and is immediately discarded.
-            // ==========================================================================
-            try (PDDocument scoutDocument = Loader.loadPDF(inputFile)) {
-                int totalPages = scoutDocument.getNumberOfPages();
+            try (PDDocument document = Loader.loadPDF(inputFile)) {
+                int totalPages = document.getNumberOfPages();
 
                 for (int i = 0; i < totalPages; i++) {
-                    PDPage scoutPage = scoutDocument.getPage(i);
-                    if (DEBUG_MODE) System.out.println(String.format("[SCOUT] Analyzing Page %d in complete isolation...", i + 1));
+                    PDPage page = document.getPage(i);
+                    System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
+
+                    // ==========================================================================
+                    // STEP 1: ISOLATED METRIC DETECTION PASS
+                    // Script 1 and Script 2 run entirely in-memory to classify our vectors.
+                    // Absolutely zero graphic or stream operations happen here.
+                    // ==========================================================================
+                    if (DEBUG_MODE) System.out.println("[PIPELINE] Running Isolated Spatial Analysis Engine...");
+                    Script2Analyst analyst = new Script2Analyst(page);
+                    analyst.executeAnalysisPipeline();
                     
-                    Script2Analyst analyst = new Script2Analyst(scoutPage);
-                    List<Rectangle2D> approvedKeepList = analyst.generateApprovedSnapshot();
-                    
-                    // Save the 1,563 clean coordinates safely outside this document's scope
-                    documentLevelKeepList.add(approvedKeepList);
-                }
-            } catch (IOException e) {
-                System.err.println("[PIPELINE FATAL] Isolated Scout failed: " + e.getMessage());
-                continue;
-            }
+                    List<Rectangle2D> linesToKill = analyst.getBlacklistLinesToKill();
+                    List<Rectangle2D> linesToKeep = analyst.getApprovedKeepList();
 
-            // ==========================================================================
-            // PHASE 2: PRODUCTION TARGET WRITER (DOCUMENT INSTANCE 2)
-            // A fresh load where no graphics engines or token iterations have touched the state.
-            // ==========================================================================
-            try (PDDocument targetDocument = Loader.loadPDF(inputFile)) {
-                int totalPages = targetDocument.getNumberOfPages();
-
-                for (int i = 0; i < totalPages; i++) {
-                    PDPage targetPage = targetDocument.getPage(i);
-                    List<Rectangle2D> approvedKeepList = documentLevelKeepList.get(i);
-
-                    if (approvedKeepList != null && !approvedKeepList.isEmpty()) {
-                        if (DEBUG_MODE) {
-                            System.out.println(String.format("[WRITE] Drawing exactly %d approved lines onto fresh Page %d...", 
-                                    approvedKeepList.size(), i + 1));
-                        }
+                    // ==========================================================================
+                    // STEP 2: UNIFIED VISUAL EXECUTION PASS
+                    // We open a single content stream to perform the erasure and the draw pass.
+                    // ==========================================================================
+                    if (!linesToKill.isEmpty() || !linesToKeep.isEmpty()) {
+                        if (DEBUG_MODE) System.out.println("[PIPELINE] Opening graphics stream layer for unified updates...");
                         
-                        // Open the visual stream for the *first and only* time in this runtime scope
                         try (PDPageContentStream outputStream = new PDPageContentStream(
-                                targetDocument, targetPage, PDPageContentStream.AppendMode.APPEND, true, true)) {
+                                document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                             
-                            outputStream.setStrokingColor(Color.GREEN);
-                            outputStream.setLineWidth(1.0f);
+                            // ------------------------------------------------------------------
+                            // SUB-STEP A: THE WHITE-OUT ERASER
+                            // Active white masking shields the original background artifacts from view
+                            // ------------------------------------------------------------------
+                            if (!linesToKill.isEmpty()) {
+                                if (DEBUG_MODE) System.out.println(String.format("  -> Masking out %d artifact zones with opaque white fill...", linesToKill.size()));
+                                outputStream.setNonStrokingColor(Color.WHITE);
+                                
+                                for (Rectangle2D badLine : linesToKill) {
+                                    // Apply a microscopic padding boundary (0.5 point) to prevent anti-aliasing color bleed
+                                    float padding = 0.5f;
+                                    outputStream.addRect(
+                                        (float) badLine.getX() - padding, 
+                                        (float) badLine.getY() - padding, 
+                                        (float) badLine.getWidth() + (padding * 2), 
+                                        (float) badLine.getHeight() + (padding * 2)
+                                    );
+                                    outputStream.fill(); // Solid fill commits the white mask over the old coordinates
+                                }
+                            }
 
-                            for (Rectangle2D drawingTarget : approvedKeepList) {
-                                outputStream.addRect((float) drawingTarget.getX(), (float) drawingTarget.getY(), 
-                                                     (float) drawingTarget.getWidth(), (float) drawingTarget.getHeight());
-                                outputStream.stroke();
+                            // ------------------------------------------------------------------
+                            // SUB-STEP B: TARGETED RECOLOR PLOT
+                            // Draws our 1,563 approved vector locations cleanly in green right on top
+                            // ------------------------------------------------------------------
+                            if (!linesToKeep.isEmpty()) {
+                                if (DEBUG_MODE) System.out.println(String.format("  -> Drawing %d approved snapshot paths in green...", linesToKeep.size()));
+                                outputStream.setStrokingColor(Color.GREEN);
+                                outputStream.setLineWidth(1.0f);
+
+                                for (Rectangle2D cleanLine : linesToKeep) {
+                                    outputStream.addRect(
+                                        (float) cleanLine.getX(), 
+                                        (float) cleanLine.getY(), 
+                                        (float) cleanLine.getWidth(), 
+                                        (float) cleanLine.getHeight()
+                                    );
+                                    outputStream.stroke();
+                                }
                             }
                         }
+                        if (DEBUG_MODE) System.out.println("  -> Unified White-Out and Drawing Pass committed successfully.");
                     }
                 }
 
-                System.out.println("\n[FINALIZE] Committing fresh visual changes to disk...");
-                targetDocument.save(outputFile);
-                System.out.println("SUCCESS: File cleanly generated at: " + outputFile.getAbsolutePath());
+                System.out.println("\n[FINALIZE] Committing memory state alterations to storage...");
+                document.save(outputFile);
+                System.out.println("SUCCESS: Cleaned snapshot document compiled at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[PIPELINE FATAL] Production writer failed: " + e.getMessage());
+                System.err.println("[PIPELINE FATAL] Document processing crashed: " + e.getMessage());
             }
         }
     }
@@ -115,20 +131,26 @@ public class VectorRecolor {
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
+        private final List<Rectangle2D> approvedKeepList = new ArrayList<>();
+        private final List<Rectangle2D> blacklistLinesToKill = new ArrayList<>();
 
         public Script2Analyst(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
         }
 
-        public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
+        public List<Rectangle2D> getApprovedKeepList() { return approvedKeepList; }
+        public List<Rectangle2D> getBlacklistLinesToKill() { return blacklistLinesToKill; }
+
+        public void executeAnalysisPipeline() throws IOException {
+            // Run Script 1 internally strictly to harvest coordinate references in memory
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
-            List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
+            // Map and categorize by size dimensions matching your custom structural table fields
             for (Rectangle2D shape : rawScoutedVectors) {
                 if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
                     targetBoxesToAudit.add(new VisualBox(shape));
@@ -163,24 +185,19 @@ public class VectorRecolor {
                     }
                 }
 
-                filterSnapshotObjects(targetBoxesToAudit, approvedKeepList);
+                filterSnapshotObjects(targetBoxesToAudit);
             }
 
             if (DEBUG_MODE) {
-                int elementsDropped = rawScoutedVectors.size() - approvedKeepList.size();
-                System.out.println(String.format("  -> [Snapshot Metrics] Discovered: %d | Approved: %d | Omitted: %d", 
-                        rawScoutedVectors.size(), approvedKeepList.size(), elementsDropped));
+                System.out.println(String.format("  -> [Metrics Evaluation] Scouted: %d | Approved (Keep): %d | Isolated (Kill): %d", 
+                        rawScoutedVectors.size(), approvedKeepList.size(), blacklistLinesToKill.size()));
             }
-
-            return approvedKeepList;
         }
 
-        private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
+        private void filterSnapshotObjects(List<VisualBox> boxes) {
             float alignmentTolerance = 5.0f;  
             float sizeMatchTolerance = 2.0f;  
             float gapSearchLimit = 15.0f;     
-
-            int skipCount = 0;
 
             for (int i = 0; i < boxes.size(); i++) {
                 VisualBox target = boxes.get(i);
@@ -226,9 +243,9 @@ public class VectorRecolor {
                 }
 
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
-                    skipCount++;
+                    blacklistLinesToKill.add(target.originalShape);
                     if (DEBUG_MODE) {
-                        System.out.println(String.format("    -> [FILTER TARGET] Correctly dropping artifact line at X=%.1f, Y=%.1f", 
+                        System.out.println(String.format("    -> [CLASSIFIED ARTIFACT] Queued for erasure at X=%.1f, Y=%.1f", 
                                 target.originalShape.getX(), target.originalShape.getY()));
                     }
                 } else {
@@ -245,7 +262,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: RAW GRAPHICS VECTOR DISCOVERY PASS (SCOUT ENGINE)
+     * SCRIPT 1: NATIVE GRAPHICS STREAM ENGINE INTERCEPTOR
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
