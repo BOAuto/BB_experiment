@@ -50,16 +50,15 @@ public class VectorRecolor {
                     System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
 
                     // ==========================================================
-                    // STEP 1 & 2: SCRIPT 2 RUNS INTERNALLY (SCOUTS & ANALYZES ALL)
+                    // STEP 1 & 2: SCOUT AND ISOLATE
                     // ==========================================================
                     if (DEBUG_MODE) System.out.println("[PIPELINE] Initializing Script 2 Analysis Engine...");
                     Script2Analyst analyst = new Script2Analyst(page);
                     
-                    // Gathers, audits, and filters every vector down to the clean array
                     List<Rectangle2D> approvedKeepList = analyst.generateApprovedSnapshot();
 
                     // ==========================================================
-                    // STEP 3 & 4: SCRIPT 1 DRAW PASS WITH THE FILTERED SNAPSHOT
+                    // STEP 3 & 4: RECOLORED DRAW PASS
                     // ==========================================================
                     if (!approvedKeepList.isEmpty()) {
                         if (DEBUG_MODE) System.out.println("[PIPELINE] Script 1 drawing approved snapshot vectors to stream...");
@@ -77,8 +76,6 @@ public class VectorRecolor {
                             }
                         }
                         if (DEBUG_MODE) System.out.println("  -> Safe Draw Execution successful for current page.");
-                    } else {
-                        if (DEBUG_MODE) System.out.println("  -> Alert: Keep-list is empty. Skipping stream drawing step.");
                     }
                 }
 
@@ -92,9 +89,6 @@ public class VectorRecolor {
         }
     }
 
-    // ==========================================================
-    // SCRIPT 2: THE ISOLATED ARCHITECT AND ANALYST
-    // ==========================================================
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
@@ -105,19 +99,21 @@ public class VectorRecolor {
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
-            if (DEBUG_MODE) System.out.println("  -> [Script 2 Internal] Spawning DrawingBoxEngine to scout coordinates...");
             DrawingBoxEngine scout = new DrawingBoxEngine(page);
             scout.processPage(page);
             List<Rectangle2D> rawScoutedVectors = scout.getDetectedBoxes();
             
-            if (DEBUG_MODE) System.out.println(String.format("  -> [Script 2 Internal] Scout gathered %d vectors. Running rigorous text analysis...", rawScoutedVectors.size()));
-
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
 
-            // CRITICAL FIX: Direct ALL elements to audit. No shortcuts or size filters.
+            // RESTORED: Your original sizing rules that isolated the exact 20 lines
             for (Rectangle2D shape : rawScoutedVectors) {
-                targetBoxesToAudit.add(new VisualBox(shape));
+                if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
+                    targetBoxesToAudit.add(new VisualBox(shape));
+                } else {
+                    // Small elements are saved directly to the keep-list
+                    approvedKeepList.add(shape);
+                }
             }
 
             if (!targetBoxesToAudit.isEmpty()) {
@@ -128,12 +124,8 @@ public class VectorRecolor {
                     Rectangle2D rawBounds = targetBoxesToAudit.get(b).originalShape;
                     float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
                     
-                    // CRITICAL FIX: Ensure hair-thin/zero metrics have a valid physical area to capture text
-                    float regionW = Math.max((float)rawBounds.getWidth(), 2.0f);
-                    float regionH = Math.max((float)rawBounds.getHeight(), 2.0f);
-                    
                     stripper.addRegion("reg_" + b, new Rectangle2D.Float(
-                            (float)rawBounds.getX(), awtY, regionW, regionH));
+                            (float)rawBounds.getX() + 1.0f, awtY + 1.0f, (float)rawBounds.getWidth() - 2.0f, (float)rawBounds.getHeight() - 2.0f));
                 }
 
                 stripper.extractRegions(page);
@@ -143,15 +135,14 @@ public class VectorRecolor {
                     String extractedText = stripper.getTextForRegion("reg_" + b).trim();
                     
                     boolean textIsEmpty = extractedText.isEmpty();
-                    // Calibrated column width tolerances specifically targeting table border anomalies
-                    boolean isStructuralGapColumn = (box.originalShape.getWidth() > 1.0 && box.originalShape.getWidth() < 25.0);
+                    boolean isStructuralGapColumn = (box.originalShape.getWidth() > 3.0 && box.originalShape.getWidth() < 22.0);
 
                     if (textIsEmpty || isStructuralGapColumn) {
                         box.isEmptyArea = true;
                     }
                 }
 
-                // Filter everything through the geometry calculation engine
+                // Filter the audited items
                 filterSnapshotObjects(targetBoxesToAudit, approvedKeepList);
             }
 
@@ -165,9 +156,10 @@ public class VectorRecolor {
         }
 
         private void filterSnapshotObjects(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
-            float alignmentTolerance = 12.0f;  
-            float sizeMatchTolerance = 5.0f;   
-            float gapSearchLimit = 35.0f;      
+            // RESTORED: Your original tight precision rules
+            float alignmentTolerance = 5.0f;  
+            float sizeMatchTolerance = 2.0f;  
+            float gapSearchLimit = 15.0f;     
 
             int skipCount = 0;
 
@@ -214,19 +206,21 @@ public class VectorRecolor {
                     }
                 }
 
+                // Exact grid selection matrix rule
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
                     skipCount++;
-                    if (DEBUG_MODE && skipCount <= 20) {
-                        System.out.println(String.format("    -> [SKIPPED BY AUDIT] Confirmed Grid Artifact Line Skipped at X=%.1f, Y=%.1f", 
+                    if (DEBUG_MODE) {
+                        System.out.println(String.format("    -> [REMOVAL CONFIRMED] Dropping targeted structural line from keep-list at X=%.1f, Y=%.1f", 
                                 target.originalShape.getX(), target.originalShape.getY()));
                     }
+                    // FIXED: By skipping 'approvedKeepList.add', this object is cleanly omitted from the output array
                 } else {
                     approvedKeepList.add(target.originalShape);
                 }
             }
             
             if (DEBUG_MODE) {
-                System.out.println(String.format("  -> [Filter Outcome] Script 2 successfully filtered and omitted %d structural lines.", skipCount));
+                System.out.println(String.format("  -> [Filter Outcome] Successfully omitted %d lines from the drawing layer.", skipCount));
             }
         }
     }
@@ -240,9 +234,6 @@ public class VectorRecolor {
         }
     }
 
-    // ==========================================================
-    // SCRIPT 1: RAW GRAPHICS VECTOR DISCOVERY PASS (SCOUT)
-    // ==========================================================
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
