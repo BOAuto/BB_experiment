@@ -1,25 +1,28 @@
 package main.java;
 
 import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
+import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.cos.COSName;
+import org.apache.pdfbox.pdfparser.PDFStreamParser;
+import org.apache.pdfbox.pdfwriter.ContentStreamWriter;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.apache.pdfbox.text.PDFTextStripperByArea;
-import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
 
-import java.awt.Color;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
 public class VectorRecolor {
 
-    // Central control for verbose trace logging
-    private static final boolean DEBUG_MODE = true;
+    // --- PIPELINE CONTROL FLAGS ---
+    private static final boolean REMOVE_LINES_MODE = true; 
 
     public static void main(String[] args) {
         File inputDir = new File("pdfs");
@@ -27,176 +30,259 @@ public class VectorRecolor {
 
         if (!outputDir.exists()) {
             outputDir.mkdirs();
-            if (DEBUG_MODE) System.out.println("[INIT] Created output target directory: " + outputDir.getPath());
         }
 
         File[] files = inputDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".pdf"));
+
         if (files == null || files.length == 0) {
-            System.out.println("[ERROR] No target PDF documents discovered in 'pdfs/' folder.");
+            System.out.println("No PDF files found in 'pdfs/' directory.");
             return;
         }
 
         for (File inputFile : files) {
-            File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
-            
+            File outputFile = new File(outputDir, "normalized_" + inputFile.getName());
             System.out.println("\n==========================================================================");
             System.out.println("PIPELINE START: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
-                int totalPages = document.getNumberOfPages();
-                if (DEBUG_MODE) System.out.println(String.format("[PHASE 1] File loaded into volatile memory. Pages: %d", totalPages));
-
-                for (int i = 0; i < totalPages; i++) {
+                
+                for (int i = 0; i < document.getNumberOfPages(); i++) {
                     PDPage page = document.getPage(i);
                     float pageHeight = page.getMediaBox().getHeight();
                     
-                    System.out.println(String.format("\n--- Execution Loop: Page %d of %d ---", i + 1, totalPages));
+                    System.out.println("\n--- Execution Loop: Page " + (i + 1) + " of " + document.getNumberOfPages() + " ---");
+                    System.out.println("[STEP 1] Deploying DrawingBoxEngine as Scout to map raw vectors...");
 
-                    // ==========================================================
-                    // PIPELINE STEP 1: THE DISCOVERY RUN (SCOUT PHASE)
-                    // ==========================================================
-                    if (DEBUG_MODE) System.out.println("[STEP 1] Deploying DrawingBoxEngine as Scout to map raw vectors...");
-                    DrawingBoxEngine scoutEngine = new DrawingBoxEngine(page);
-                    scoutEngine.processPage(page);
-                    List<Rectangle2D> rawScoutedVectors = scoutEngine.getDetectedBoxes();
-                    
-                    System.out.println(String.format("  -> Step 1 Outcome: Scout mapped %d vector profiles from raw stream.", rawScoutedVectors.size()));
+                    // ==========================================================================
+                    // PHASE 1: IN-MEMORY ANALYSIS (Strictly Passive Background Scan)
+                    // ==========================================================================
+                    DrawingBoxEngine engine = new DrawingBoxEngine(page);
+                    engine.processPage(page);
+                    List<Rectangle2D> rawBoxes = engine.getDetectedBoxes();
+                    System.out.println("  -> Step 1 Outcome: Scout mapped " + rawBoxes.size() + " vector profiles from raw stream.");
 
-                    // ==========================================================
-                    // PIPELINE STEP 2: THE ISOLATED AUDIT (TEXT EVALUATION)
-                    // ==========================================================
-                    List<Rectangle2D> approvedKeepList = new ArrayList<>();
-                    
-                    if (!rawScoutedVectors.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[STEP 2] Initiating isolated layout text area analysis...");
-                        List<VisualBox> targetBoxesToAudit = new ArrayList<>();
-                        
-                        for (Rectangle2D shape : rawScoutedVectors) {
-                            // Filter out completely insignificant hair-thin noise metrics up front
-                            if (shape.getWidth() > 2.0 && shape.getHeight() > 4.0) {
-                                targetBoxesToAudit.add(new VisualBox(shape));
-                            } else {
-                                // Add minor elements straight to keep list to preserve default structure safely
-                                approvedKeepList.add(shape);
-                            }
-                        }
-
-                        if (!targetBoxesToAudit.isEmpty()) {
-                            PDFTextStripperByArea stripper = new PDFTextStripperByArea();
-                            stripper.setSortByPosition(true);
-
-                            // Register coordinate bounding spaces to extract
-                            for (int b = 0; b < targetBoxesToAudit.size(); b++) {
-                                Rectangle2D rawBounds = targetBoxesToAudit.get(b).originalShape;
-                                float awtY = pageHeight - (float)rawBounds.getY() - (float)rawBounds.getHeight();
-                                stripper.addRegion("region_" + b, new Rectangle2D.Float(
-                                        (float)rawBounds.getX() + 1.0f, awtY + 1.0f, (float)rawBounds.getWidth() - 2.0f, (float)rawBounds.getHeight() - 2.0f));
-                            }
-
-                            stripper.extractRegions(page);
-
-                            // Set state variables based on inner structural data presence
-                            for (int b = 0; b < targetBoxesToAudit.size(); b++) {
-                                VisualBox box = targetBoxesToAudit.get(b);
-                                String extractedText = stripper.getTextForRegion("region_" + b).trim();
-                                
-                                boolean textIsEmpty = extractedText.isEmpty();
-                                boolean isStructuralGapColumn = (box.originalShape.getWidth() > 3.0 && box.originalShape.getWidth() < 22.0);
-
-                                if (textIsEmpty || isStructuralGapColumn) {
-                                    box.isEmptyArea = true;
-                                }
-                            }
-
-                            // ==========================================================
-                            // PIPELINE STEP 3: THE FILTRATION PHASE (SKIP UNWANTED COORDS)
-                            // ==========================================================
-                            if (DEBUG_MODE) System.out.println("[STEP 3] Running filtration matrix to isolate unwanted layout line patterns...");
-                            executeSnapshotFiltration(targetBoxesToAudit, approvedKeepList);
+                    List<VisualBox> visualBoxes = new ArrayList<>();
+                    for (Rectangle2D rb : rawBoxes) {
+                        if (rb.getWidth() > 2.0 && rb.getHeight() > 4.0) {
+                            visualBoxes.add(new VisualBox((float)rb.getX(), (float)rb.getY(), (float)rb.getWidth(), (float)rb.getHeight()));
                         }
                     }
 
-                    // Log snapshot variations to console output to confirm vector reductions
-                    if (DEBUG_MODE) {
-                        int elementsDropped = rawScoutedVectors.size() - approvedKeepList.size();
-                        System.out.println("  -> [METRIC VERIFICATION SNAPSHOT]");
-                        System.out.println(String.format("     * Pre-Evaluation Vectors discovered : %d", rawScoutedVectors.size()));
-                        System.out.println(String.format("     * Filtered Keep-List count          : %d", approvedKeepList.size()));
-                        System.out.println(String.format("     * Vector elements safely SKIPPED    : %d", elementsDropped));
-                    }
+                    if (!visualBoxes.isEmpty() && REMOVE_LINES_MODE) {
+                        System.out.println("[STEP 2] Initiating isolated layout text area analysis...");
+                        PDFTextStripperByArea stripper = new PDFTextStripperByArea();
+                        stripper.setSortByPosition(true);
 
-                    // ==========================================================
-                    // PIPELINE STEP 4: THE EXECUTION RUN (GREEN OVERLAY WRITE)
-                    // ==========================================================
-                    if (!approvedKeepList.isEmpty()) {
-                        if (DEBUG_MODE) System.out.println("[STEP 4] Writing filtered approved snapshot vectors as clean green objects...");
-                        try (PDPageContentStream outputStream = new PDPageContentStream(
-                                document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
+                        for (int b = 0; b < visualBoxes.size(); b++) {
+                            Rectangle2D.Float bnd = visualBoxes.get(b).bounds;
+                            float awtY = pageHeight - bnd.y - bnd.height;
+                            stripper.addRegion("box_" + b, new Rectangle2D.Float(
+                                    bnd.x + 1.0f, awtY + 1.0f, bnd.width - 2.0f, bnd.height - 2.0f));
+                        }
+
+                        stripper.extractRegions(page);
+
+                        for (int b = 0; b < visualBoxes.size(); b++) {
+                            VisualBox box = visualBoxes.get(b);
+                            String contentText = stripper.getTextForRegion("box_" + b).trim();
                             
-                            outputStream.setStrokingColor(Color.GREEN);
-                            outputStream.setLineWidth(1.0f);
+                            boolean isPureTextEmpty = contentText.isEmpty();
+                            boolean isStructuralGapColumn = (box.bounds.width > 3.0f && box.bounds.width < 22.0f);
 
-                            for (Rectangle2D drawingTarget : approvedKeepList) {
-                                outputStream.addRect((float) drawingTarget.getX(), (float) drawingTarget.getY(), 
-                                                     (float) drawingTarget.getWidth(), (float) drawingTarget.getHeight());
-                                outputStream.stroke();
+                            if (isPureTextEmpty || isStructuralGapColumn) {
+                                box.isEmpty = true;
                             }
                         }
-                        if (DEBUG_MODE) System.out.println("  -> Step 4 Outcome: Stream append successful for current page context.");
+
+                        System.out.println("[STEP 3] Running filtration matrix to isolate unwanted layout line patterns...");
+                        applyChainLinkedNormalization(visualBoxes);
+
+                        // Compile strict target segments to omit from the real content stream
+                        List<LineSegment> linesToRemove = new ArrayList<>();
+                        for (VisualBox box : visualBoxes) {
+                            if (!box.drawLeft) {
+                                System.out.println(String.format("    -> [TARGET IDENTIFIED] Flagging Left Border Line for deletion at [X=%.1f, Y=%.1f]", box.bounds.x, box.bounds.y));
+                                linesToRemove.add(new LineSegment(box.bounds.x, box.bounds.y, box.bounds.x, box.bounds.y + box.bounds.height));
+                            }
+                            if (!box.drawTop)    linesToRemove.add(new LineSegment(box.bounds.x, box.bounds.y + box.bounds.height, box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height));
+                            if (!box.drawRight)  linesToRemove.add(new LineSegment(box.bounds.x + box.bounds.width, box.bounds.y, box.bounds.x + box.bounds.width, box.bounds.y + box.bounds.height));
+                            if (!box.drawBottom) linesToRemove.add(new LineSegment(box.bounds.x, box.bounds.y, box.bounds.x + box.bounds.width, box.bounds.y));
+                        }
+
+                        // ==========================================================================
+                        // PHASE 2: MUTATION VIA LOW-LEVEL INTERCEPTION (The Only State Modification)
+                        // ==========================================================================
+                        if (!linesToRemove.isEmpty()) {
+                            System.out.println("[STEP 4] Filtering original page stream. Omitting targeted anomalies...");
+                            filterPageContentStream(document, page, linesToRemove);
+                        }
+                    } else {
+                        System.out.println("[SKIPPED] Line removal pipeline bypassed via flag constraints.");
                     }
                 }
 
-                // Persist the changes directly to the compiled target output path
-                System.out.println("\n[FINALIZE] Executing IO file compilation and write...");
+                System.out.println("\n[PHASE 3] Committing modifications and writing clean file data to disk...");
                 document.save(outputFile);
-                System.out.println("SUCCESS: Processed file committed and saved at: " + outputFile.getAbsolutePath());
+                System.out.println("  -> Successfully saved sanitized file to: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[PIPELINE FATAL] IO Operation failed in main thread loop: " + e.getMessage());
+                System.err.println("Critical pipeline error processing " + inputFile.getName() + ": " + e.getMessage());
             }
         }
     }
 
-    private static class VisualBox {
-        Rectangle2D originalShape;
-        boolean isEmptyArea = false;
+    /**
+     * Re-parses the original low-level graphic state stream. 
+     * It acts as a gatekeeper: letting the 1563 valid lines pass through completely untouched,
+     * while completely wiping out the 20 targeted layout lines.
+     */
+    private static void filterPageContentStream(PDDocument doc, PDPage page, List<LineSegment> targets) throws IOException {
+        PDFStreamParser parser = new PDFStreamParser(page);
+        List<Object> tokens = parser.parse();
+        List<Object> filteredTokens = new ArrayList<>();
 
-        VisualBox(Rectangle2D shape) {
-            this.originalShape = shape;
+        float currentX = 0, currentY = 0;
+        List<Object> currentPathSubTokens = new ArrayList<>();
+        boolean skipCurrentPathSegment = false;
+        int strippedCount = 0;
+
+        for (Object token : tokens) {
+            currentPathSubTokens.add(token);
+
+            if (token instanceof Operator) {
+                Operator op = (Operator) token;
+                String opName = op.getName();
+
+                // Path construction pattern 1: Vector sequences
+                if (opName.equals("m") || opName.equals("l")) { 
+                    int sz = currentPathSubTokens.size();
+                    float x = ((Number) currentPathSubTokens.get(sz - 3)).floatValue();
+                    float y = ((Number) currentPathSubTokens.get(sz - 2)).floatValue();
+
+                    if (opName.equals("l")) {
+                        for (LineSegment target : targets) {
+                            if (target.matchesSegment(currentX, currentY, x, y)) {
+                                skipCurrentPathSegment = true; 
+                                break;
+                            }
+                        }
+                    }
+                    currentX = x;
+                    currentY = y;
+                } 
+                // Path construction pattern 2: Atomic rectangle commands
+                else if (opName.equals("re")) {
+                    int sz = currentPathSubTokens.size();
+                    float rx = ((Number) currentPathSubTokens.get(sz - 5)).floatValue();
+                    float ry = ((Number) currentPathSubTokens.get(sz - 4)).floatValue();
+                    float rw = ((Number) currentPathSubTokens.get(sz - 3)).floatValue();
+                    float rh = ((Number) currentPathSubTokens.get(sz - 2)).floatValue();
+
+                    for (LineSegment target : targets) {
+                        if (target.matchesSegment(rx, ry, rx, ry + rh)) {
+                            skipCurrentPathSegment = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Path Painting Terminal: Commit clean tokens, or drop target vectors entirely
+                if (opName.equals("S") || opName.equals("s") || opName.equals("f") || 
+                    opName.equals("B") || opName.equals("b") || opName.equals("n")) {
+                    
+                    if (!skipCurrentPathSegment) {
+                        filteredTokens.addAll(currentPathSubTokens);
+                    } else {
+                        strippedCount++;
+                        System.out.println(String.format("    -> [STREAM MUTATION] Wiped out background path token group ending in '%s'", opName));
+                        currentPathSubTokens.clear();
+                        filteredTokens.add(Operator.getOperator("n")); // Inject a safe structural no-op closer
+                    }
+                    currentPathSubTokens.clear();
+                    skipCurrentPathSegment = false;
+                } 
+                // Transparently pass layout matrices, text markers, and graphics wrappers safely
+                else if (opName.equals("cm") || opName.equals("Q") || opName.equals("q") || opName.equals("BT") || opName.equals("ET")) {
+                    filteredTokens.addAll(currentPathSubTokens);
+                    currentPathSubTokens.clear();
+                }
+            }
+        }
+        
+        if (!currentPathSubTokens.isEmpty()) {
+            filteredTokens.addAll(currentPathSubTokens);
+        }
+
+        System.out.println("  -> Step 4 Outcome: Successfully deleted " + strippedCount + " vector blocks directly from the native stream.");
+
+        // Overwrite the original page architecture with our streamlined token state
+        PDStream updatedStream = new PDStream(doc);
+        try (OutputStream os = updatedStream.createOutputStream(COSName.FLATE_DECODE)) {
+            ContentStreamWriter writer = new ContentStreamWriter(os);
+            writer.writeTokens(filteredTokens);
+        }
+        page.setContents(updatedStream);
+    }
+
+    private static class VisualBox {
+        Rectangle2D.Float bounds;
+        boolean isEmpty = false;
+        boolean drawLeft = true;
+        boolean drawTop = true;
+        boolean drawRight = true;
+        boolean drawBottom = true;
+
+        VisualBox(float x, float y, float w, float h) {
+            this.bounds = new Rectangle2D.Float(x, y, w, h);
         }
     }
 
-    // Evaluates grid spatial alignments and determines what items populate the memory keep-list
-    private static void executeSnapshotFiltration(List<VisualBox> boxes, List<Rectangle2D> approvedKeepList) {
+    private static class LineSegment {
+        float x1, y1, x2, y2;
+        LineSegment(float x1, float y1, float x2, float y2) {
+            // Standardize layout geometry min/max vectors to ensure strict matching
+            this.x1 = Math.min(x1, x2);
+            this.y1 = Math.min(y1, y2);
+            this.x2 = Math.max(x1, x2);
+            this.y2 = Math.max(y1, y2);
+        }
+
+        boolean matchesSegment(float sx1, float sy1, float sx2, float sy2) {
+            float msx1 = Math.min(sx1, sx2);
+            float msy1 = Math.min(sy1, sy2);
+            float msx2 = Math.max(sx1, sx2);
+            float msy2 = Math.max(sy1, sy2);
+
+            // 1.5 tolerance window to accurately scale with intentionally long-form PDF coordinates
+            float tolerance = 1.5f; 
+            
+            return (Math.abs(this.x1 - msx1) < tolerance && 
+                    Math.abs(this.y1 - msy1) < tolerance && 
+                    Math.abs(this.x2 - msx2) < tolerance && 
+                    Math.abs(this.y2 - msy2) < tolerance);
+        }
+    }
+
+    private static void applyChainLinkedNormalization(List<VisualBox> boxes) {
         float alignmentTolerance = 5.0f;  
         float sizeMatchTolerance = 2.0f;  
         float gapSearchLimit = 15.0f;     
 
-        int skipLeftLineCounter = 0;
-        int skipTopLineCounter = 0;
-
         for (int i = 0; i < boxes.size(); i++) {
             VisualBox target = boxes.get(i);
-            
-            // Rule 1: If it contains layout business text content, it's instantly preserved
-            if (!target.isEmptyArea) {
-                approvedKeepList.add(target.originalShape);
-                continue;
-            }
+            if (!target.isEmpty) continue; 
 
             boolean immediateRowRepeat = false;
             boolean immediateColRepeat = false;
 
-            // X-Axis Horizontal Trajectory Scan
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
-                boolean onSameRow = Math.abs(target.originalShape.getY() - neighbor.originalShape.getY()) < alignmentTolerance;
-                boolean matchHeight = Math.abs(target.originalShape.getHeight() - neighbor.originalShape.getHeight()) < sizeMatchTolerance;
-                
+                boolean onSameRow = Math.abs(target.bounds.y - neighbor.bounds.y) < alignmentTolerance;
+                boolean matchHeight = Math.abs(target.bounds.height - neighbor.bounds.height) < sizeMatchTolerance;
                 if (onSameRow && matchHeight) {
-                    double distanceLeft = target.originalShape.getX() - (neighbor.originalShape.getX() + neighbor.originalShape.getWidth());
-                    double distanceRight = neighbor.originalShape.getX() - (target.originalShape.getX() + target.originalShape.getWidth());
+                    float distanceLeft = target.bounds.x - (neighbor.bounds.x + neighbor.bounds.width);
+                    float distanceRight = neighbor.bounds.x - (target.bounds.x + target.bounds.width);
                     if ((distanceLeft >= -alignmentTolerance && distanceLeft <= gapSearchLimit) || 
                         (distanceRight >= -alignmentTolerance && distanceRight <= gapSearchLimit)) {
                         immediateRowRepeat = true;
@@ -205,15 +291,13 @@ public class VectorRecolor {
                 }
             }
 
-            // Y-Axis Vertical Stack Trajectory Scan
             for (VisualBox neighbor : boxes) {
                 if (target == neighbor) continue;
-                boolean onSameCol = Math.abs(target.originalShape.getX() - neighbor.originalShape.getX()) < alignmentTolerance;
-                boolean matchWidth = Math.abs(target.originalShape.getWidth() - neighbor.originalShape.getWidth()) < sizeMatchTolerance;
-
+                boolean onSameCol = Math.abs(target.bounds.x - neighbor.bounds.x) < alignmentTolerance;
+                boolean matchWidth = Math.abs(target.bounds.width - neighbor.bounds.width) < sizeMatchTolerance;
                 if (onSameCol && matchWidth) {
-                    double distanceAbove = target.originalShape.getY() - (neighbor.originalShape.getY() + neighbor.originalShape.getHeight());
-                    double distanceBelow = neighbor.originalShape.getY() - (target.originalShape.getY() + target.originalShape.getHeight());
+                    float distanceAbove = target.bounds.y - (neighbor.bounds.y + neighbor.bounds.height);
+                    float distanceBelow = neighbor.bounds.y - (target.bounds.y + target.bounds.height);
                     if ((distanceAbove >= -alignmentTolerance && distanceAbove <= gapSearchLimit) || 
                         (distanceBelow >= -alignmentTolerance && distanceBelow <= gapSearchLimit)) {
                         immediateColRepeat = true;
@@ -222,32 +306,24 @@ public class VectorRecolor {
                 }
             }
 
-            // Rule 2: Evaluate relational trends to decide whether to map element to keep-list or drop it completely
             if (immediateRowRepeat && !immediateColRepeat) {
-                skipLeftLineCounter++;
-                if (DEBUG_MODE) {
-                    System.out.println(String.format("    -> [SKIPPED LINE] Target #%d dropped from keep-list (Row Grid Left Border) at [X=%.1f, Y=%.1f]", 
-                            i, target.originalShape.getX(), target.originalShape.getY()));
-                }
+                target.drawTop = false;
+                target.drawRight = false;
+                target.drawBottom = false;
             } else if (immediateColRepeat && !immediateRowRepeat) {
-                skipTopLineCounter++;
-                if (DEBUG_MODE) {
-                    System.out.println(String.format("    -> [SKIPPED LINE] Target #%d dropped from keep-list (Col Grid Top Border) at [X=%.1f, Y=%.1f]", 
-                            i, target.originalShape.getX(), target.originalShape.getY()));
+                target.drawLeft = false;
+                target.drawRight = false;
+                target.drawBottom = false;
+            } else if (immediateRowRepeat && immediateColRepeat) {
+                if (target.bounds.width < 22.0f) {
+                    target.drawTop = false;
+                    target.drawRight = false;
+                    target.drawBottom = false;
                 }
-            } else {
-                // Keep independent layout fields, standalone boundaries, or text blocks
-                approvedKeepList.add(target.originalShape);
             }
-        }
-
-        if (DEBUG_MODE) {
-            System.out.println(String.format("  -> Filtration Logic Summary: Omitted %d Vertical and %d Horizontal Grid anomalies.", 
-                    skipLeftLineCounter, skipTopLineCounter));
         }
     }
 
-    // Standard low-level token reading engine mapping shapes cleanly to tracking context
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
         private Double minX, minY, maxX, maxY;
@@ -282,7 +358,10 @@ public class VectorRecolor {
 
         @Override public void moveTo(float x, float y) throws IOException { updateBounds(x, y); }
         @Override public void lineTo(float x, float y) throws IOException { updateBounds(x, y); }
-        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException { updateBounds(x1, y1); updateBounds(x3, y3); }
+        @Override public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3) throws IOException {
+            updateBounds(x1, y1);
+            updateBounds(x3, y3);
+        }
         @Override public void strokePath() throws IOException { flushPath(); }
         @Override public void fillPath(int windingRule) throws IOException { flushPath(); }
         @Override public void fillAndStrokePath(int windingRule) throws IOException { flushPath(); }
