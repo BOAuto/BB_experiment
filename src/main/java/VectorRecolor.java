@@ -40,7 +40,7 @@ public class VectorRecolor {
             File outputFile = new File(outputDir, "drawings_and_normalized_" + inputFile.getName());
             
             System.out.println("\n==========================================================================");
-            System.out.println("CELL-FUSION INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
+            System.out.println("TWIN-LINE INTERCEPTOR ACTIVE FOR FILE: " + inputFile.getName());
             System.out.println("==========================================================================");
 
             try (PDDocument document = Loader.loadPDF(inputFile)) {
@@ -50,13 +50,15 @@ public class VectorRecolor {
                     PDPage page = document.getPage(i);
                     System.out.println(String.format("\n>>> PROCESSING PAGE %d OF %d <<<", i + 1, totalPages));
 
-                    // STAGE 1: Process page and extract fused artifact boundary zones
+                    // STAGE 1: Run analysis to locate locked references and target vertical lines
                     Script2Analyst analyst = new Script2Analyst(page);
                     List<Rectangle2D> linesToKeep = analyst.generateApprovedSnapshot();
-                    List<Rectangle2D> strictBannedZones = analyst.getBannedCoordinateZones();
+                    
+                    Map<Rectangle2D, Boolean> exclusionRegistry = analyst.getExclusionRegistry();
+                    List<Rectangle2D> lockedLineCoordinates = analyst.getLockedLineCoordinates();
 
-                    // STAGE 2: Render phase with shared-wall suppression filter
-                    System.out.println(String.format("[STAGE 2] Running rendering loop. Dropping intersecting artifact paths..."));
+                    // STAGE 2: Precision Render Loop
+                    System.out.println(String.format("[STAGE 2] Running rendering loop. Dropping only locked lines and overlapping twins..."));
                     if (!linesToKeep.isEmpty()) {
                         try (PDPageContentStream outputStream = new PDPageContentStream(
                                 document, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
@@ -64,56 +66,43 @@ public class VectorRecolor {
                             outputStream.setStrokingColor(Color.GREEN);
                             outputStream.setLineWidth(1.0f);
 
-                            float snappingWindow = 1.5f; // Structural alignment snapping box
+                            float coordinateTolerance = 1.0f; // Sharp precision matching
                             int paintCount = 0;
 
                             for (Rectangle2D cleanLine : linesToKeep) {
-                                boolean isAnArtifactBorderLine = false;
+                                boolean shouldDrop = false;
 
-                                for (Rectangle2D bannedBox : strictBannedZones) {
-                                    double boxLeftX   = bannedBox.getX();
-                                    double boxRightX  = bannedBox.getX() + bannedBox.getWidth();
-                                    double boxBottomY = bannedBox.getY();
-                                    double boxTopY    = bannedBox.getY() + bannedBox.getHeight();
+                                // 1. Check the Registry Lock directly (Line 1)
+                                Boolean isExplicitlyLocked = exclusionRegistry.get(cleanLine);
+                                if (isExplicitlyLocked != null && isExplicitlyLocked) {
+                                    shouldDrop = true;
+                                }
 
-                                    // SANITY CHECK: Handle Vertical Lines (Left/Right Boundaries)
-                                    if (cleanLine.getHeight() > cleanLine.getWidth()) {
-                                        boolean matchesLeftFlank  = Math.abs(cleanLine.getX() - boxLeftX) < snappingWindow;
-                                        boolean matchesRightFlank = Math.abs(cleanLine.getX() - boxRightX) < snappingWindow;
-                                        
-                                        boolean insideVerticalSpan = cleanLine.getY() >= (boxBottomY - snappingWindow) &&
-                                                                     cleanLine.getY() <= (boxTopY + snappingWindow);
+                                // 2. Check for the Overlapping Twin (Line 2)
+                                if (!shouldDrop) {
+                                    for (Rectangle2D lockedCoord : lockedLineCoordinates) {
+                                        // Only match if it's a vertical line segment sharing the exact X column and vertical space
+                                        boolean xMatches = Math.abs(cleanLine.getX() - lockedCoord.getX()) < coordinateTolerance;
+                                        boolean yMatches = Math.abs(cleanLine.getY() - lockedCoord.getY()) < coordinateTolerance;
+                                        boolean heightMatches = Math.abs(cleanLine.getHeight() - lockedCoord.getHeight()) < coordinateTolerance;
 
-                                        // If it hits either side of the artifact block, block it immediately
-                                        // regardless of whether an adjacent cell attempts to draw it.
-                                        if ((matchesLeftFlank || matchesRightFlank) && insideVerticalSpan) {
-                                            isAnArtifactBorderLine = true;
-                                            break;
-                                        }
-                                    } 
-                                    // SANITY CHECK: Handle Horizontal Lines (Top/Bottom Boundaries)
-                                    else {
-                                        boolean matchesBottomFlank = Math.abs(cleanLine.getY() - boxBottomY) < snappingWindow;
-                                        boolean matchesTopFlank    = Math.abs(cleanLine.getY() - boxTopY) < snappingWindow;
-                                        
-                                        boolean insideHorizontalSpan = cleanLine.getX() >= (boxLeftX - snappingWindow) &&
-                                                                       cleanLine.getX() <= (boxRightX + snappingWindow);
-
-                                        if ((matchesBottomFlank || matchesTopFlank) && insideHorizontalSpan) {
-                                            isAnArtifactBorderLine = true;
+                                        if (xMatches && yMatches && heightMatches) {
+                                            shouldDrop = true;
                                             break;
                                         }
                                     }
                                 }
 
-                                if (isAnArtifactBorderLine) {
+                                // Target Drop Execution
+                                if (shouldDrop) {
                                     if (DEBUG_MODE) {
-                                        System.out.println(String.format("  [OVERPOLICED DROP SUCCESS] Blocked shared edge line at -> X=%.3f, Y=%.3f", 
-                                                cleanLine.getX(), cleanLine.getY()));
+                                        System.out.println(String.format("  [TARGETED DROP SUCCESS] Dropped line at -> X=%.3f, Y=%.3f (W=%.3f, H=%.3f)", 
+                                                cleanLine.getX(), cleanLine.getY(), cleanLine.getWidth(), cleanLine.getHeight()));
                                     }
                                     continue; 
                                 }
 
+                                // Draw legitimate table headers, text boxes, top/bottom borders safely
                                 paintCount++;
                                 outputStream.addRect(
                                     (float) cleanLine.getX(), 
@@ -123,37 +112,42 @@ public class VectorRecolor {
                                 );
                                 outputStream.stroke();
                             }
-                            System.out.println(String.format("  -> Render loop complete. Green line paths drawn: %d", paintCount));
+                            System.out.println(String.format("  -> Render loop finished. Approved paths painted: %d", paintCount));
                         }
                     }
                     System.out.println(String.format(">>> PAGE %d PROCESSING COMPLETE <<<\n", i + 1));
                 }
 
-                System.out.println("[FINALIZE] Saving modified PDF document...");
+                System.out.println("[FINALIZE] Saving PDF...");
                 document.save(outputFile);
-                System.out.println("[SUCCESS] Clean file generated at: " + outputFile.getAbsolutePath());
+                System.out.println("[SUCCESS] Processing completed. Output available at: " + outputFile.getAbsolutePath());
 
             } catch (IOException e) {
-                System.err.println("[FATAL ERROR] Pipeline terminated unexpectedly: " + e.getMessage());
+                System.err.println("[FATAL SYSTEM ERROR] Pipeline aborted: " + e.getMessage());
             }
         }
     }
 
     /**
-     * SCRIPT 2: FUSION-ENABLED ANALYST
+     * SCRIPT 2: REGISTRY LOCK ANALYST
      */
     private static class Script2Analyst {
         private final PDPage page;
         private final float pageHeight;
-        private final List<Rectangle2D> bannedCoordinateZones = new ArrayList<>();
+        private final Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
+        private final List<Rectangle2D> lockedLineCoordinates = new ArrayList<>();
 
         public Script2Analyst(PDPage page) {
             this.page = page;
             this.pageHeight = page.getMediaBox().getHeight();
         }
 
-        public List<Rectangle2D> getBannedCoordinateZones() {
-            return bannedCoordinateZones;
+        public Map<Rectangle2D, Boolean> getExclusionRegistry() {
+            return exclusionRegistry;
+        }
+
+        public List<Rectangle2D> getLockedLineCoordinates() {
+            return lockedLineCoordinates;
         }
 
         public List<Rectangle2D> generateApprovedSnapshot() throws IOException {
@@ -163,7 +157,6 @@ public class VectorRecolor {
             
             List<Rectangle2D> approvedKeepList = new ArrayList<>();
             List<VisualBox> targetBoxesToAudit = new ArrayList<>();
-            Map<Rectangle2D, Boolean> exclusionRegistry = new IdentityHashMap<>();
 
             for (Rectangle2D shape : rawScoutedVectors) {
                 exclusionRegistry.put(shape, false); 
@@ -197,7 +190,7 @@ public class VectorRecolor {
                     }
                 }
 
-                filterSnapshotObjects(targetBoxesToAudit, exclusionRegistry);
+                filterSnapshotObjects(targetBoxesToAudit);
             }
 
             for (Rectangle2D originalVector : rawScoutedVectors) {
@@ -207,14 +200,11 @@ public class VectorRecolor {
             return approvedKeepList;
         }
 
-        private void filterSnapshotObjects(List<VisualBox> boxes, Map<Rectangle2D, Boolean> exclusionRegistry) {
-            float alignmentTolerance = 5.0f;  
-            float sizeMatchTolerance = 2.0f;  
-            float gapSearchLimit = 15.0f;     
+        private void filterSnapshotObjects(List<VisualBox> boxes) {
+            float alignmentTolerance = 1.0f;  
+            float sizeMatchTolerance = 1.0f;  
+            float gapSearchLimit = 0.5f; // Force adjacency matching
 
-            List<VisualBox> artifactBoxes = new ArrayList<>();
-
-            // 1. Establish initial structural row and column repeats
             for (int i = 0; i < boxes.size(); i++) {
                 VisualBox target = boxes.get(i);
                 if (!target.isEmptyArea) continue;
@@ -254,53 +244,12 @@ public class VectorRecolor {
                     }
                 }
 
+                // If it hits the row layout repeat structure, log it explicitly
                 if ((immediateRowRepeat && !immediateColRepeat) || (immediateColRepeat && !immediateRowRepeat)) {
                     exclusionRegistry.put(target.rawSourceLineReference, true); 
-                    artifactBoxes.add(target);
+                    lockedLineCoordinates.add(target.rawSourceLineReference);
                 }
             }
-
-            // ==========================================================================
-            // STEP 2: CELL FUSION MATRIX MACHINE
-            // Merge side-by-side or stacked empty container paths into unified tracking footprints
-            // ==========================================================================
-            List<Rectangle2D> fusedZones = new ArrayList<>();
-            boolean[] mergedFlags = new boolean[artifactBoxes.size()];
-
-            for (int i = 0; i < artifactBoxes.size(); i++) {
-                if (mergedFlags[i]) continue;
-                VisualBox current = artifactBoxes.get(i);
-                Rectangle2D.Double consolidatedBounds = new Rectangle2D.Double(
-                        current.transformedShape.getX(),
-                        current.transformedShape.getY(),
-                        current.transformedShape.getWidth(),
-                        current.transformedShape.getHeight()
-                );
-
-                for (int j = i + 1; j < artifactBoxes.size(); j++) {
-                    if (mergedFlags[j]) continue;
-                    VisualBox comparisonTarget = artifactBoxes.get(j);
-
-                    // Validate if they share a direct horizontal continuous line path
-                    boolean adjacentHorizontal = Math.abs(consolidatedBounds.getY() - comparisonTarget.transformedShape.getY()) < alignmentTolerance &&
-                                                 Math.abs(consolidatedBounds.getHeight() - comparisonTarget.transformedShape.getHeight()) < sizeMatchTolerance &&
-                                                 (Math.abs((consolidatedBounds.getX() + consolidatedBounds.getWidth()) - comparisonTarget.transformedShape.getX()) < alignmentTolerance ||
-                                                  Math.abs((comparisonTarget.transformedShape.getX() + comparisonTarget.transformedShape.getWidth()) - consolidatedBounds.getX()) < alignmentTolerance);
-
-                    if (adjacentHorizontal) {
-                        double newMinX = Math.min(consolidatedBounds.getX(), comparisonTarget.transformedShape.getX());
-                        double newMaxX = Math.max(consolidatedBounds.getX() + consolidatedBounds.getWidth(), comparisonTarget.transformedShape.getX() + comparisonTarget.transformedShape.getWidth());
-                        
-                        consolidatedBounds.x = newMinX;
-                        consolidatedBounds.width = newMaxX - newMinX;
-                        mergedFlags[j] = true; // Flag instance as absorbed
-                    }
-                }
-                fusedZones.add(consolidatedBounds);
-            }
-
-            // Populate master black list map with consolidated structural boundaries
-            bannedCoordinateZones.addAll(fusedZones);
         }
     }
 
@@ -316,7 +265,7 @@ public class VectorRecolor {
     }
 
     /**
-     * SCRIPT 1: SUB-STREAM ENGINE
+     * SCRIPT 1: CORE VECTOR PATH SCOUT
      */
     private static class DrawingBoxEngine extends PDFGraphicsStreamEngine {
         private final List<Rectangle2D> detectedBoxes = new ArrayList<>();
